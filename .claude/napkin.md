@@ -29,7 +29,7 @@
 - Removes runtime latency for image generation
 
 ## Gemini API Details
-- Image model: `gemini-2.5-flash-image` (confirmed working 2026-02-28; `gemini-2.0-flash-preview-image-generation` was removed)
+- Image model: `gemini-3.1-flash-image-preview` (updated 2026-02-28; previous models deprecated)
 - Text model: `gemini-2.5-flash` (for narrative/chat)
 - Use `responseMimeType: "application/json"` for structured narrative output
 - Image generation: responseModalities includes "image", get base64 from response

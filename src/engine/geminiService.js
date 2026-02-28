@@ -11,7 +11,7 @@ import {
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/';
 const TEXT_MODEL = 'gemini-2.5-flash';
-const IMAGE_MODEL = 'gemini-2.5-flash-image';
+const IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
 
 if (!API_KEY) console.error('[GeminiService] VITE_GEMINI_API_KEY not set in .env');
 
