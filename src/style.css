@@ -1,0 +1,79 @@
+/* ── Scrollbar ──────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+/* ── CRT Scanlines ─────────────────────────────────── */
+.scanlines::before {
+  content: "";
+  display: block;
+  position: absolute;
+  top: 0; left: 0; bottom: 0; right: 0;
+  background:
+    linear-gradient(rgba(18,16,16,0) 50%, rgba(0,0,0,0.15) 50%),
+    linear-gradient(90deg, rgba(255,0,0,0.03), rgba(0,255,0,0.01), rgba(0,0,255,0.03));
+  z-index: 50;
+  background-size: 100% 3px, 3px 100%;
+  pointer-events: none;
+}
+
+/* ── CRT Flicker ───────────────────────────────────── */
+@keyframes flicker {
+  0%   { opacity: 0.98; }
+  5%   { opacity: 0.95; }
+  10%  { opacity: 0.99; }
+  15%  { opacity: 1; }
+  100% { opacity: 1; }
+}
+
+.screen-flicker {
+  animation: flicker 4s infinite;
+}
+
+/* ── Screen noise static ───────────────────────────── */
+#screen-noise {
+  transition: opacity 0.5s ease;
+}
+
+/* ── Video within CRT ──────────────────────────────── */
+#world {
+  transition: opacity 0.7s ease;
+}
+
+/* ── Screen content transitions ────────────────────── */
+#screen-content {
+  transition: opacity 0.3s ease;
+}
+
+/* ── Ambient glow ──────────────────────────────────── */
+#ambient-glow {
+  transition: opacity 0.5s ease;
+}
+
+/* ── HUD elements ──────────────────────────────────── */
+#hud-bar,
+#hud-overlay {
+  transition: opacity 0.5s ease 0.3s;
+}
+
+/* ── Error toast ───────────────────────────────────── */
+#error-toast {
+  transition: opacity 0.3s ease;
+}
+
+/* ── Textarea focus ring ───────────────────────────── */
+#prompt-input:focus {
+  outline: none;
+}
+
+/* ── Reduced motion ────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

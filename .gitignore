@@ -1,8 +1,5 @@
-node_modules/
-dist/
+node_modules
+dist
+.vite
 .env
-*.local
-test-results/
-playwright-report/
-.playwright-cli
-.vercel
+.playwright-mcp
