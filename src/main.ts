@@ -206,7 +206,8 @@ async function refinePrompt(raw: string): Promise<string> {
       config: {
         systemInstruction: SYSTEM_PROMPT,
         temperature: 0.7,
-        maxOutputTokens: 300,
+        maxOutputTokens: 500,
+        thinkingConfig: { thinkingBudget: 0 },
       },
     });
     return response.text?.trim() || raw;
@@ -223,7 +224,8 @@ async function refineInteractPrompt(raw: string): Promise<string> {
       config: {
         systemInstruction: INTERACT_SYSTEM_PROMPT,
         temperature: 0.5,
-        maxOutputTokens: 100,
+        maxOutputTokens: 200,
+        thinkingConfig: { thinkingBudget: 0 },
       },
     });
     return response.text?.trim() || raw;
@@ -581,6 +583,8 @@ async function startWorld(rawPrompt: string, image?: File) {
 
   // Refine prompt if provided
   const prompt = rawPrompt ? await refinePrompt(rawPrompt) : undefined;
+  console.log("[genesis] world raw:", rawPrompt);
+  console.log("[genesis] world refined:", prompt);
 
   // Update loading message
   const inner = loadingMsg.querySelector("p");
@@ -628,6 +632,8 @@ async function interactWorld(rawPrompt: string) {
   const loadingMsg = addChatMessage("engine", "Applying changes…", { loading: true });
 
   const prompt = await refineInteractPrompt(rawPrompt);
+  console.log("[genesis] interact raw:", rawPrompt);
+  console.log("[genesis] interact refined:", prompt);
 
   pendingInteracts.set(prompt, loadingMsg);
 
@@ -701,6 +707,27 @@ input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     form.requestSubmit();
+  }
+});
+
+// Paste image from clipboard
+input.addEventListener("paste", (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith("image/")) {
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (!file) return;
+      if (file.size > 25 * 1024 * 1024) {
+        flashError("Image must be under 25MB.");
+        return;
+      }
+      attachedImage = file;
+      imageThumb.src = URL.createObjectURL(file);
+      imagePreview.classList.remove("hidden");
+      return;
+    }
   }
 });
 
