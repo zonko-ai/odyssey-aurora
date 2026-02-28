@@ -8,7 +8,7 @@ import {
   buildChoicesPrompt,
 } from './storyBible.js';
 
-const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+const API_KEY = (import.meta.env.VITE_GEMINI_API_KEY || '').trim();
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/';
 const TEXT_MODEL = 'gemini-2.5-flash';
 const IMAGE_MODEL = 'gemini-3.1-flash-image-preview';

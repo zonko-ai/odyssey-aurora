@@ -5,7 +5,7 @@
 
 import { Odyssey } from '@odysseyml/odyssey';
 
-const API_KEY = import.meta.env.VITE_ODYSSEY_API_KEY;
+const API_KEY = (import.meta.env.VITE_ODYSSEY_API_KEY || '').trim();
 if (!API_KEY) console.error('[OdysseyManager] VITE_ODYSSEY_API_KEY not set in .env');
 const INTERACT_COOLDOWN_MS = 1500;
 
