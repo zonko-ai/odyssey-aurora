@@ -44,6 +44,9 @@
 - Playwright `run-code` in this environment expects a function expression (e.g., `async function run(page){...}`), not raw statements.
 - `rg --files` without excluding `node_modules` explodes output and slows review; always scope to `src/` or filter with `rg -v '/node_modules/'`.
 - For API-dependent E2E on this project, route-mocking Gemini endpoints + patching `odysseyManager` methods in browser context enables deterministic full-flow validation when real keys are unavailable.
+- **Gemini model IDs deprecate quickly** — `gemini-2.0-flash-preview-image-generation` returned 404 by 2026-02-28. Always test with curl before committing model ID changes.
+- **Odyssey SDK WebRTC race condition** — `connect()` resolves (status="connected") BEFORE `clientToStreamerChannel.onopen` fires. Calling `startStream()` immediately throws "Client to streamer channel not open". Fix: retry loop with 300ms delay in `startScene()`, up to 10 attempts (~3s max).
+- **Anchor images are NOT regenerated on every Begin click** — `preloadAll()` caches in memory Map + localStorage. Subsequent visits load from cache instantly. Only first visit (or cleared cache) triggers Gemini image generation.
 
 ## Lessons from v1
 - Error recovery: need graceful reconnect, not just page reload

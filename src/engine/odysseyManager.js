@@ -95,6 +95,8 @@ const odysseyManager = {
 
   /**
    * Start streaming a scene with a prompt.
+   * Includes retry logic to work around SDK race condition where connect()
+   * resolves before the WebRTC data channel is fully open.
    * @param {string} streamPrompt - The stative-verb prompt describing the scene.
    * @returns {Promise<void>}
    */
@@ -108,8 +110,33 @@ const odysseyManager = {
       await this.endCurrentStream();
     }
 
-    await client.startStream(streamPrompt, false); // false = landscape
-    streaming = true;
+    // Retry loop: SDK race condition — connect() resolves before the
+    // WebRTC clientToStreamerChannel.readyState becomes "open".
+    // startStream → sendEvent throws "Client to streamer channel not open".
+    const MAX_RETRIES = 10;
+    const RETRY_DELAY_MS = 300;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        await client.startStream(streamPrompt, false); // false = landscape
+        streaming = true;
+        return;
+      } catch (err) {
+        const isChannelNotOpen =
+          err?.message?.includes('channel not open') ||
+          err?.message?.includes('Channel not open');
+
+        if (isChannelNotOpen && attempt < MAX_RETRIES) {
+          console.warn(
+            `[OdysseyManager] Data channel not ready, retry ${attempt}/${MAX_RETRIES}...`
+          );
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+          continue;
+        }
+
+        throw err;
+      }
+    }
   },
 
   /**

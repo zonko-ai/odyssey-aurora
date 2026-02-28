@@ -48,8 +48,8 @@ export default function StartScreen({ progress, phase, onBegin }) {
         A Deep Space Adventure
       </p>
 
-      {/* Progress (subtle, minimal) */}
-      {phase === 'PRELOADING' && progress.percent < 100 && (
+      {/* Progress bar — shown during initial preload before scene 0 is ready */}
+      {phase === 'PRELOADING' && progress.loaded < 1 && (
         <div className="w-64 mb-12 relative z-10">
           <div className="h-px bg-neutral-800 rounded-full overflow-hidden">
             <div
@@ -69,16 +69,24 @@ export default function StartScreen({ progress, phase, onBegin }) {
         </p>
       )}
 
-      {/* BEGIN button — only when preloading is complete */}
-      {(progress.percent >= 100 && phase === 'PRELOADING') || phase === 'SCENE_READY' ? (
-        <button
-          onClick={onBegin}
-          className="px-12 py-4 text-lg tracking-widest uppercase text-cyan border border-cyan/30
-            rounded-lg animate-breathe hover:bg-cyan/10 hover:border-cyan/50 transition-colors
-            glow-cyan relative z-10"
-        >
-          Begin
-        </button>
+      {/* BEGIN button — shows once scene 0 is loaded */}
+      {phase === 'SCENE_READY' ? (
+        <div className="flex flex-col items-center relative z-10">
+          <button
+            onClick={onBegin}
+            className="px-12 py-4 text-lg tracking-widest uppercase text-cyan border border-cyan/30
+              rounded-lg animate-breathe hover:bg-cyan/10 hover:border-cyan/50 transition-colors
+              glow-cyan"
+          >
+            Begin
+          </button>
+          {/* Subtle background preload indicator */}
+          {progress.percent < 100 && (
+            <p className="text-[10px] text-neutral-700 mt-4">
+              Loading scenes... {progress.loaded}/{progress.total}
+            </p>
+          )}
+        </div>
       ) : null}
     </div>
   );

@@ -298,14 +298,17 @@ export default function useGame() {
     // Start preloading anchor images
     gs.setState({ phase: Phase.PRELOADING });
     preloadAll((progress) => {
-      if (mountedRef.current) {
-        setPreloadProgress(progress);
+      if (!mountedRef.current) return;
+      setPreloadProgress(progress);
+
+      // Show Begin as soon as scene 0 (first scene) is loaded.
+      // Rest continues preloading in background — no need to wait for all 11.
+      if (progress.loaded >= 1 && gs.getState().phase === Phase.PRELOADING) {
+        gs.setState({ phase: Phase.SCENE_READY });
       }
     }).then(() => {
       if (mountedRef.current) {
         setPreloadProgress(getProgress());
-        // Stay in PRELOADING — handleBegin moves to CONNECTING
-        gs.setState({ phase: Phase.SCENE_READY });
       }
     }).catch((err) => {
       console.error('[useGame] Preload failed:', err);
