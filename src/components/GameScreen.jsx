@@ -1,26 +1,17 @@
-import { useMemo, useCallback } from 'react';
+import { useCallback } from 'react';
 import useGame from '../hooks/useGame';
-import useNpcChat from '../hooks/useNpcChat';
 import { Phase } from '../engine/gameState';
-import audioEngine from '../engine/audioEngine';
-import odysseyManager from '../engine/odysseyManager';
 
 import VideoLayer from './VideoLayer';
 import StartScreen from './StartScreen';
 import NarrativeOverlay from './NarrativeOverlay';
-import ChoicePanel from './ChoicePanel';
-import NpcChatPanel from './NpcChatPanel';
-import TalkOrb from './TalkOrb';
 import HUD from './HUD';
-
-import { NPCS } from '../engine/storyBible';
 
 export default function GameScreen() {
   const {
     phase,
     currentScene,
     narrative,
-    choices,
     error,
     volume,
     preloadProgress,
@@ -29,29 +20,10 @@ export default function GameScreen() {
     anchorImageUrl,
     videoRef,
     handleBegin,
-    handleChoice,
+    handleNext,
     handleNarrativeComplete,
     setVolume,
   } = useGame();
-
-  const npcChat = useNpcChat({
-    sceneContext: currentScene?.narrativeContext,
-    audioEngine,
-    odysseyManager,
-  });
-
-  // Find the first NPC in the current scene that is not 'nova'
-  const talkableNpc = useMemo(() => {
-    if (!currentScene?.npcs) return null;
-    const npcId = currentScene.npcs.find((id) => id !== 'nova');
-    return npcId ? NPCS[npcId] : null;
-  }, [currentScene]);
-
-  const handleTalkOrbClick = useCallback(() => {
-    if (talkableNpc) {
-      npcChat.openChat(talkableNpc.id);
-    }
-  }, [talkableNpc, npcChat]);
 
   const handlePlayAgain = useCallback(() => {
     window.location.reload();
@@ -60,10 +32,9 @@ export default function GameScreen() {
   const isTransitioning = phase === Phase.TRANSITIONING;
   const showStartScreen = phase === Phase.PRELOADING || phase === Phase.CONNECTING || phase === Phase.BOOT || phase === Phase.SCENE_READY;
   const showNarrative = phase === Phase.NARRATIVE;
-  const showChoices = phase === Phase.CHOICES;
+  const showNext = phase === Phase.CHOICES;
   const showEnding = phase === Phase.ENDING;
   const showError = phase === Phase.ERROR;
-  const showTalkOrb = talkableNpc && phase === Phase.CHOICES && !npcChat.isOpen;
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-base">
@@ -95,13 +66,18 @@ export default function GameScreen() {
         />
       )}
 
-      {/* Choice panel */}
-      {showChoices && (
-        <ChoicePanel
-          choices={choices}
-          isVisible={showChoices}
-          onChoice={handleChoice}
-        />
+      {/* Next button */}
+      {showNext && (
+        <div className="absolute bottom-12 left-0 right-0 flex justify-center z-10 animate-fade-in">
+          <button
+            onClick={handleNext}
+            className="px-10 py-3 text-sm tracking-[0.25em] uppercase text-white/80 border border-white/20
+              rounded-full hover:bg-white/10 hover:border-white/40 hover:text-white
+              transition-all duration-300 backdrop-blur-sm"
+          >
+            Next
+          </button>
+        </div>
       )}
 
       {/* Ending display */}
@@ -109,7 +85,7 @@ export default function GameScreen() {
         <div className="absolute inset-0 flex items-center justify-center z-20">
           <div className="glass max-w-lg mx-8 px-10 py-12 text-center animate-fade-in">
             <p className="text-xs tracking-[0.3em] uppercase text-cyan/60 mb-4">
-              Journey Complete
+              The End
             </p>
             <h2 className="text-3xl font-bold text-neutral-100 mb-6">
               {ending.title}
@@ -122,10 +98,9 @@ export default function GameScreen() {
               className="px-8 py-3 text-sm tracking-widest uppercase text-cyan border border-cyan/30
                 rounded-lg hover:bg-cyan/10 hover:border-cyan/50 transition-colors glow-cyan"
             >
-              Play Again
+              Watch Again
             </button>
           </div>
-          {/* Dark overlay behind ending panel */}
           <div className="absolute inset-0 bg-black/60 -z-10" />
         </div>
       )}
@@ -135,7 +110,7 @@ export default function GameScreen() {
         <div className="absolute inset-0 flex items-center justify-center z-20">
           <div className="glass max-w-md mx-8 px-8 py-8 text-center animate-fade-in">
             <p className="text-xs tracking-[0.2em] uppercase text-red-400/80 mb-4">
-              System Error
+              Something went wrong
             </p>
             <p className="text-sm text-neutral-400 mb-8 leading-relaxed">
               {error}
@@ -159,25 +134,6 @@ export default function GameScreen() {
         volume={volume}
         onVolumeChange={setVolume}
       />
-
-      {/* Talk orb for NPC interaction */}
-      <TalkOrb
-        npc={talkableNpc}
-        onClick={handleTalkOrbClick}
-        isVisible={showTalkOrb}
-      />
-
-      {/* NPC chat panel */}
-      {npcChat.isOpen && (
-        <NpcChatPanel
-          isOpen={npcChat.isOpen}
-          messages={npcChat.messages}
-          isTyping={npcChat.isTyping}
-          currentNpc={npcChat.currentNpc}
-          onClose={npcChat.closeChat}
-          onSendMessage={npcChat.sendMessage}
-        />
-      )}
     </div>
   );
 }

@@ -47,6 +47,7 @@
 - **Gemini model IDs deprecate quickly** — `gemini-2.0-flash-preview-image-generation` returned 404 by 2026-02-28. Always test with curl before committing model ID changes.
 - **Odyssey SDK WebRTC race condition** — `connect()` resolves (status="connected") BEFORE `clientToStreamerChannel.onopen` fires. Calling `startStream()` immediately throws "Client to streamer channel not open". Fix: retry loop with 300ms delay in `startScene()`, up to 10 attempts (~3s max).
 - **Anchor images are NOT regenerated on every Begin click** — `preloadAll()` caches in memory Map + localStorage. Subsequent visits load from cache instantly. Only first visit (or cleared cache) triggers Gemini image generation.
+- **Vercel env vars can have trailing newlines** — when piping values via CLI or pasting in dashboard, a `\n` can sneak into the value. Always `.trim()` env vars before use, especially API keys. This caused a 401 "Invalid API key" from Odyssey auth that was invisible without inspecting the raw request body.
 
 ## Lessons from v1
 - Error recovery: need graceful reconnect, not just page reload

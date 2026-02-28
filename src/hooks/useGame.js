@@ -1,14 +1,11 @@
 // ─── useGame — Main game orchestration hook ─────────────────────────────────
 // Manages the full game lifecycle: preloading, Odyssey connection, scene flow,
-// narrative generation, player choices, transitions, and endings.
+// narrative generation, "Next" advancement, transitions, and ending.
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { getScene } from '../engine/sceneRegistry.js';
+import { getScene, getSceneCount } from '../engine/sceneRegistry.js';
 import { buildStreamPrompt } from '../engine/storyBible.js';
-import {
-  generateNarrative,
-  generateChoices,
-} from '../engine/geminiService.js';
+import { generateNarrative } from '../engine/geminiService.js';
 import odysseyManager from '../engine/odysseyManager.js';
 import audioEngine from '../engine/audioEngine.js';
 import { preloadAll, getProgress, getImage } from '../engine/anchorPreloader.js';
@@ -28,10 +25,9 @@ export default function useGame() {
   const [phase, setPhase] = useState(Phase.BOOT);
   const [currentScene, setCurrentScene] = useState(null);
   const [narrative, setNarrative] = useState('');
-  const [choices, setChoices] = useState([]);
   const [error, setError] = useState(null);
   const [volume, setVolumeState] = useState(0.7);
-  const [preloadProgress, setPreloadProgress] = useState({ loaded: 0, total: 11, percent: 0 });
+  const [preloadProgress, setPreloadProgress] = useState({ loaded: 0, total: getSceneCount(), percent: 0 });
   const [frozenFrame, setFrozenFrame] = useState(null);
   const [ending, setEnding] = useState(null);
   const [anchorImageUrl, setAnchorImageUrl] = useState(null);
@@ -42,7 +38,6 @@ export default function useGame() {
     setPhase(state.phase);
     setCurrentScene(getScene(state.currentSceneId));
     setNarrative(state.currentNarrative || '');
-    setChoices(state.currentChoices || []);
     setError(state.error || null);
     setVolumeState(state.volume);
     if (state.ending) setEnding(state.ending);
@@ -82,17 +77,10 @@ export default function useGame() {
 
       gs.setState({ phase: Phase.NARRATIVE });
 
-      // Determine last choice text for narrative continuity
-      const history = gs.getState().choiceHistory;
-      const lastChoice = history.length > 0
-        ? history[history.length - 1].text
-        : null;
-
       // Generate narrative via Gemini
       const narrativeText = await generateNarrative(
         scene.name,
         scene.narrativeContext,
-        lastChoice,
       );
 
       if (!mountedRef.current) return;
@@ -105,50 +93,12 @@ export default function useGame() {
     }
   }, []);
 
-  // ── Handle narrative display complete (called by NarrativeOverlay) ──────
-  const handleNarrativeComplete = useCallback(async () => {
+  // ── Handle narrative display complete (typewriter finished) ─────────────
+  const handleNarrativeComplete = useCallback(() => {
     const gs = gameStateRef.current;
     if (!gs || !mountedRef.current) return;
-
-    try {
-      gs.setState({ phase: Phase.CHOICES });
-
-      const state = gs.getState();
-      const scene = getScene(state.currentSceneId);
-      if (!scene) return;
-
-      // For branch scenes, always use fallback choices — their IDs must match
-      // the transition.options keys exactly (e.g. 'goto-moon', 'goto-mars')
-      if (scene.transition.type === 'branch') {
-        gs.setState({ currentChoices: scene.fallbackChoices });
-        return;
-      }
-
-      // Generate choices via Gemini, fall back to hardcoded
-      let generatedChoices;
-      try {
-        generatedChoices = await generateChoices(
-          scene.name,
-          scene.narrativeContext,
-          scene.choiceContext,
-        );
-      } catch (err) {
-        console.warn('[useGame] Choice generation failed, using fallbacks:', err);
-        generatedChoices = scene.fallbackChoices;
-      }
-
-      if (!mountedRef.current) return;
-      gs.setState({ currentChoices: generatedChoices || scene.fallbackChoices });
-    } catch (err) {
-      console.error('[useGame] handleNarrativeComplete error:', err);
-      if (mountedRef.current) {
-        // Use fallback choices so the game can continue
-        const scene = getScene(gameStateRef.current.getState().currentSceneId);
-        if (scene) {
-          gs.setState({ currentChoices: scene.fallbackChoices, phase: Phase.CHOICES });
-        }
-      }
-    }
+    // Show "Next" button (reuses CHOICES phase)
+    gs.setState({ phase: Phase.CHOICES });
   }, []);
 
   // ── Transition to next scene ────────────────────────────────────────────
@@ -182,54 +132,32 @@ export default function useGame() {
     }
   }, [loadScene]);
 
-  // ── Handle player choice ────────────────────────────────────────────────
-  const handleChoice = useCallback(async (choice) => {
+  // ── Handle "Next" button press ──────────────────────────────────────────
+  const handleNext = useCallback(async () => {
     const gs = gameStateRef.current;
     if (!gs || !mountedRef.current) return;
 
-    try {
-      gs.setState({ phase: Phase.ACTING });
+    const state = gs.getState();
+    const scene = getScene(state.currentSceneId);
+    if (!scene) return;
 
-      // Record choice and play click SFX
-      gs.recordChoice(gs.getState().currentSceneId, choice);
-      audioEngine.playSfx('click');
+    // Mark scene as visited
+    const newVisited = state.visitedScenes.includes(scene.id)
+      ? state.visitedScenes
+      : [...state.visitedScenes, scene.id];
+    gs.setState({ visitedScenes: newVisited });
 
-      // Send visual reaction to Odyssey
-      const interactPrompt = `The captain has decided to: ${choice.text}. ` +
-        'The environment is reacting subtly to this decision.';
-      odysseyManager.interact(interactPrompt);
+    // Check transition
+    if (scene.transition.type === 'ending') {
+      const endingResult = gs.computeEnding();
+      gs.setState({ phase: Phase.ENDING, ending: endingResult });
+      return;
+    }
 
-      // Wait for visual reaction
-      await wait(2000);
-      if (!mountedRef.current) return;
-
-      // Save progress
-      gs.save();
-
-      // Determine next scene
-      const nextSceneId = gs.getNextSceneId(choice.id);
-
-      if (nextSceneId === null) {
-        // Ending path
-        const endingResult = gs.computeEnding();
-        gs.setState({ phase: Phase.ENDING, ending: endingResult });
-        return;
-      }
-
-      if (Array.isArray(nextSceneId)) {
-        // Visit-type: multiple destinations available
-        // Last element is the advance destination (then); pick it to progress
-        const target = nextSceneId[nextSceneId.length - 1];
-        await transitionToScene(target);
-      } else {
-        // Direct linear/branch transition
-        await transitionToScene(nextSceneId);
-      }
-    } catch (err) {
-      console.error('[useGame] handleChoice error:', err);
-      if (mountedRef.current) {
-        gs.setState({ phase: Phase.ERROR, error: err.message });
-      }
+    // Linear transition
+    const nextSceneId = scene.transition.next;
+    if (nextSceneId != null) {
+      await transitionToScene(nextSceneId);
     }
   }, [transitionToScene]);
 
@@ -250,9 +178,8 @@ export default function useGame() {
 
       if (!mountedRef.current) return;
 
-      // Load the first (or saved) scene
-      const startSceneId = gs.getState().currentSceneId;
-      await loadScene(startSceneId);
+      // Load the first scene
+      await loadScene(0);
     } catch (err) {
       console.error('[useGame] handleBegin error:', err);
       if (mountedRef.current) {
@@ -286,11 +213,8 @@ export default function useGame() {
       syncFromGameState(state);
     });
 
-    // Try loading saved progress
-    const hasSave = gs.load();
-    if (!hasSave) {
-      gs.setState({ currentSceneId: 0 });
-    }
+    // Always start fresh (no save/resume for linear story)
+    gs.setState({ currentSceneId: 0 });
 
     // Initial sync
     syncFromGameState(gs.getState());
@@ -301,8 +225,7 @@ export default function useGame() {
       if (!mountedRef.current) return;
       setPreloadProgress(progress);
 
-      // Show Begin as soon as scene 0 (first scene) is loaded.
-      // Rest continues preloading in background — no need to wait for all 11.
+      // Show Begin as soon as scene 0 (first scene) is loaded
       if (progress.loaded >= 1 && gs.getState().phase === Phase.PRELOADING) {
         gs.setState({ phase: Phase.SCENE_READY });
       }
@@ -331,7 +254,6 @@ export default function useGame() {
     phase,
     currentScene,
     narrative,
-    choices,
     error,
     volume,
     preloadProgress,
@@ -342,7 +264,7 @@ export default function useGame() {
 
     // Actions
     handleBegin,
-    handleChoice,
+    handleNext,
     handleNarrativeComplete,
     handleInteract,
     setVolume,

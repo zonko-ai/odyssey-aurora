@@ -14,8 +14,8 @@ const MAX_CONCURRENT = 2;
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
 
-// Priority tiers: scene 0 first, then 1-3, then 4-10
-const PRIORITY_QUEUE = [[0], [1, 2, 3], [4, 5, 6, 7, 8, 9, 10]];
+// Priority tiers: scene 0 first, then 1-3, then 4-11
+const PRIORITY_QUEUE = [[0], [1, 2, 3], [4, 5, 6, 7, 8, 9, 10, 11]];
 
 // ─── Cache State ──────────────────────────────────────────────────────────────
 
