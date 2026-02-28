@@ -9,7 +9,9 @@ import { buildImagePrompt } from './storyBible.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const STORAGE_PREFIX = 'odyssey_anchor_';
+// Bump version to invalidate old cached images (e.g. after story rewrite)
+const CACHE_VERSION = 'piper_v1';
+const STORAGE_PREFIX = `${CACHE_VERSION}_anchor_`;
 const MAX_CONCURRENT = 2;
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
@@ -137,6 +139,16 @@ async function generateWithRetry(sceneId) {
 export async function preloadAll(onProgress) {
   loaded = 0;
   total = SCENES.length;
+
+  // Clean up stale cache entries from previous story versions
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (key && key.includes('_anchor_') && !key.startsWith(CACHE_VERSION)) {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch { /* ignore storage errors */ }
 
   // Phase 1: Load everything available from localStorage
   for (const scene of SCENES) {
