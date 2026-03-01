@@ -99,9 +99,7 @@ let audioCtx: AudioContext | null = null;
 let analyserNode: AnalyserNode | null = null;
 let waveformRaf: number | null = null;
 
-// ── Ambient sound ───────────────────────────────────
-let ambientHumGain: GainNode | null = null;
-let ambientHumOsc: OscillatorNode | null = null;
+// ── Sound effects ───────────────────────────────────
 let sfxCtx: AudioContext | null = null;
 
 // ── Example prompts rotation ────────────────────────
@@ -612,97 +610,9 @@ function playPowerOnBuzz() {
   noiseSrc.start(now);
 }
 
-// Track all hum nodes for cleanup
-let humNodes: (OscillatorNode | AudioBufferSourceNode)[] = [];
-
-/** Multi-harmonic CRT transformer hum with noise floor — fades in when connected */
-function startAmbientHum() {
-  const ctx = ensureSfxCtx();
-  if (ambientHumOsc) return; // already running
-
-  const now = ctx.currentTime;
-
-  ambientHumGain = ctx.createGain();
-  ambientHumGain.gain.setValueAtTime(0, now);
-  ambientHumGain.gain.linearRampToValueAtTime(1.0, now + 2.0);
-  ambientHumGain.connect(ctx.destination);
-
-  humNodes = [];
-
-  // Fundamental 60Hz
-  const osc1 = ctx.createOscillator();
-  osc1.type = "sine";
-  osc1.frequency.value = 60;
-  const g1 = ctx.createGain();
-  g1.gain.value = 0.25;
-  osc1.connect(g1).connect(ambientHumGain);
-  osc1.start(now);
-  humNodes.push(osc1);
-  ambientHumOsc = osc1; // keep reference
-
-  // 2nd harmonic 120Hz (strongest in real CRT transformers)
-  const osc2 = ctx.createOscillator();
-  osc2.type = "sine";
-  osc2.frequency.value = 120;
-  const g2 = ctx.createGain();
-  g2.gain.value = 0.15;
-  osc2.connect(g2).connect(ambientHumGain);
-  osc2.start(now);
-  humNodes.push(osc2);
-
-  // 3rd harmonic 180Hz (adds warmth)
-  const osc3 = ctx.createOscillator();
-  osc3.type = "sine";
-  osc3.frequency.value = 180;
-  const g3 = ctx.createGain();
-  g3.gain.value = 0.06;
-  osc3.connect(g3).connect(ambientHumGain);
-  osc3.start(now);
-  humNodes.push(osc3);
-
-  // Subtle high-frequency whine (CRT flyback — very quiet)
-  const whine = ctx.createOscillator();
-  whine.type = "sine";
-  whine.frequency.value = 15734; // NTSC horizontal scan frequency
-  const whineGain = ctx.createGain();
-  whineGain.gain.value = 0.008; // barely audible
-  whine.connect(whineGain).connect(ambientHumGain);
-  whine.start(now);
-  humNodes.push(whine);
-
-  // Filtered noise floor (electronic hiss)
-  const noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
-  const noiseData = noiseBuf.getChannelData(0);
-  for (let i = 0; i < noiseData.length; i++) {
-    noiseData[i] = Math.random() * 2 - 1;
-  }
-  const noiseSrc = ctx.createBufferSource();
-  noiseSrc.buffer = noiseBuf;
-  noiseSrc.loop = true;
-  const noiseFilter = ctx.createBiquadFilter();
-  noiseFilter.type = "bandpass";
-  noiseFilter.frequency.value = 300;
-  noiseFilter.Q.value = 0.5;
-  const noiseGain = ctx.createGain();
-  noiseGain.gain.value = 0.03;
-  noiseSrc.connect(noiseFilter).connect(noiseGain).connect(ambientHumGain);
-  noiseSrc.start(now);
-  humNodes.push(noiseSrc);
-}
-
-function stopAmbientHum() {
-  if (ambientHumGain && sfxCtx) {
-    const now = sfxCtx.currentTime;
-    ambientHumGain.gain.cancelScheduledValues(now);
-    ambientHumGain.gain.setValueAtTime(ambientHumGain.gain.value, now);
-    ambientHumGain.gain.linearRampToValueAtTime(0, now + 0.5);
-    const nodes = humNodes;
-    setTimeout(() => { nodes.forEach(n => { try { n.stop(); } catch { /* ignore */ } }); }, 600);
-  }
-  ambientHumOsc = null;
-  ambientHumGain = null;
-  humNodes = [];
-}
+// Ambient hum removed — it was feeding back into the mic and interfering with Deepgram STT
+function startAmbientHum() { /* no-op */ }
+function stopAmbientHum() { /* no-op */ }
 
 // ── Image attach helpers ───────────────────────────────
 btnAttach.addEventListener("click", () => {
