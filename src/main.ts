@@ -25,7 +25,6 @@ const errorToast = document.getElementById("error-toast") as HTMLDivElement;
 const screenContent = document.getElementById("screen-content") as HTMLDivElement;
 const screenIdle = document.getElementById("screen-idle") as HTMLDivElement;
 const screenBoot = document.getElementById("screen-boot") as HTMLDivElement;
-const bootStatus = document.getElementById("boot-status") as HTMLDivElement;
 const crtScreen = document.getElementById("crt-screen") as HTMLDivElement;
 const ambientGlow = document.getElementById("ambient-glow") as HTMLDivElement;
 const hudBar = document.getElementById("hud-bar") as HTMLDivElement;
@@ -40,6 +39,13 @@ const micIcon = document.getElementById("mic-icon") as HTMLElement;
 const btnNarrator = document.getElementById("btn-narrator") as HTMLButtonElement;
 const narratorIcon = document.getElementById("narrator-icon") as HTMLElement;
 const voiceTranscript = document.getElementById("voice-transcript") as HTMLDivElement;
+const voiceStatus = document.getElementById("voice-status") as HTMLDivElement;
+const voiceStatusText = document.getElementById("voice-status-text") as HTMLSpanElement;
+const voiceWaveform = document.getElementById("voice-waveform") as HTMLCanvasElement;
+const micLabel = document.getElementById("mic-label") as HTMLSpanElement;
+const bootLines = document.getElementById("boot-lines") as HTMLDivElement;
+const bootTerminal = document.getElementById("boot-terminal") as HTMLDivElement;
+const examplePromptBtn = document.getElementById("example-prompt-btn") as HTMLButtonElement;
 
 // ── Clients ────────────────────────────────────────────
 const odyssey = new Odyssey({
@@ -82,6 +88,26 @@ let dgSocket: WebSocket | null = null;
 let mediaStream: MediaStream | null = null;
 let mediaRecorder: MediaRecorder | null = null;
 
+// ── Web Audio API (waveform visualizer) ─────────────
+let audioCtx: AudioContext | null = null;
+let analyserNode: AnalyserNode | null = null;
+let waveformRaf: number | null = null;
+
+// ── Example prompts rotation ────────────────────────
+const EXAMPLE_PROMPTS = [
+  "A medieval castle at sunset with torches flickering\u2026",
+  "An underwater city glowing with bioluminescent coral\u2026",
+  "A cozy mountain cabin during a heavy snowstorm\u2026",
+  "A neon-lit Tokyo alley at midnight in the rain\u2026",
+  "An ancient Roman colosseum during a gladiator battle\u2026",
+  "A peaceful zen garden with cherry blossoms falling\u2026",
+];
+let exampleRotationInterval: ReturnType<typeof setInterval> | null = null;
+let currentExampleIndex = 0;
+
+// ── Boot sequence tracking ──────────────────────────
+let bootSequenceRunning = false;
+
 function startDeepgram() {
   if (!DEEPGRAM_API_KEY) {
     flashError("Deepgram API key not configured.");
@@ -90,6 +116,11 @@ function startDeepgram() {
 
   navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
     mediaStream = stream;
+
+    // Set up Web Audio analyser for waveform visualizer
+    setupAudioAnalyser(stream);
+    startWaveform();
+    setVoiceStatus("listening");
 
     const url = `wss://api.deepgram.com/v1/listen?model=nova-3&language=en&smart_format=true&interim_results=true&utterance_end_ms=1500&vad_events=true`;
     dgSocket = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
@@ -112,27 +143,35 @@ function startDeepgram() {
       const data = JSON.parse(event.data);
       if (data.type === "Results") {
         const transcript = data.channel?.alternatives?.[0]?.transcript || "";
-        if (!transcript) return;
+        if (!transcript) {
+          // No speech detected — show listening
+          setVoiceStatus("listening");
+          return;
+        }
 
         if (data.is_final) {
           // Final transcript — process it
           if (data.speech_final) {
             voiceTranscript.classList.add("hidden");
             voiceTranscript.textContent = "";
+            setVoiceStatus("listening");
             handleVoiceInput(transcript.trim());
           } else {
             // Partial final — show as interim
             voiceTranscript.textContent = transcript;
             voiceTranscript.classList.remove("hidden");
+            setVoiceStatus("transmitting", transcript);
           }
         } else {
           // Interim — show live preview
           voiceTranscript.textContent = transcript;
           voiceTranscript.classList.remove("hidden");
+          setVoiceStatus("transmitting", transcript);
         }
       } else if (data.type === "UtteranceEnd") {
         // Utterance boundary — if we have accumulated text, clear preview
         voiceTranscript.classList.add("hidden");
+        setVoiceStatus("listening");
       }
     };
 
@@ -180,6 +219,218 @@ function stopDeepgram() {
   }
 
   isListening = false;
+  stopWaveform();
+  setVoiceStatus("hidden");
+}
+
+// ── Web Audio waveform visualizer ───────────────────
+function setupAudioAnalyser(stream: MediaStream) {
+  audioCtx = new AudioContext();
+  analyserNode = audioCtx.createAnalyser();
+  analyserNode.fftSize = 64;
+  const source = audioCtx.createMediaStreamSource(stream);
+  source.connect(analyserNode);
+}
+
+function drawWaveform() {
+  if (!analyserNode || !voiceWaveform) return;
+
+  const ctx = voiceWaveform.getContext("2d");
+  if (!ctx) return;
+
+  const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
+  analyserNode.getByteFrequencyData(dataArray);
+
+  const w = voiceWaveform.width;
+  const h = voiceWaveform.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const barCount = 7;
+  const barWidth = Math.max(3, Math.floor(w / (barCount * 3)));
+  const gap = barWidth;
+  const totalWidth = barCount * barWidth + (barCount - 1) * gap;
+  const startX = (w - totalWidth) / 2;
+
+  for (let i = 0; i < barCount; i++) {
+    // Sample from spread-out frequency bins
+    const binIndex = Math.floor((i / barCount) * (dataArray.length * 0.6));
+    const value = dataArray[binIndex] / 255;
+    const barHeight = Math.max(2, value * (h - 4));
+
+    const x = startX + i * (barWidth + gap);
+    const y = (h - barHeight) / 2;
+
+    ctx.fillStyle = `rgba(245, 158, 11, ${0.5 + value * 0.5})`;
+    ctx.beginPath();
+    if (ctx.roundRect) {
+      ctx.roundRect(x, y, barWidth, barHeight, 1);
+    } else {
+      ctx.rect(x, y, barWidth, barHeight);
+    }
+    ctx.fill();
+  }
+
+  waveformRaf = requestAnimationFrame(drawWaveform);
+}
+
+function startWaveform() {
+  voiceWaveform.classList.remove("hidden");
+  voiceWaveform.width = voiceWaveform.offsetWidth || 400;
+  waveformRaf = requestAnimationFrame(drawWaveform);
+}
+
+function stopWaveform() {
+  if (waveformRaf !== null) {
+    cancelAnimationFrame(waveformRaf);
+    waveformRaf = null;
+  }
+  voiceWaveform.classList.add("hidden");
+  if (audioCtx) {
+    audioCtx.close().catch(() => {});
+    audioCtx = null;
+    analyserNode = null;
+  }
+}
+
+// ── Voice status HUD ────────────────────────────────
+function setVoiceStatus(mode: "listening" | "transmitting" | "standby" | "hidden", detail?: string) {
+  if (mode === "hidden") {
+    voiceStatus.classList.add("hidden");
+    return;
+  }
+
+  voiceStatus.classList.remove("hidden", "listening", "transmitting", "standby");
+  voiceStatus.classList.add(mode);
+
+  switch (mode) {
+    case "listening":
+      voiceStatusText.textContent = "LISTENING";
+      break;
+    case "transmitting":
+      voiceStatusText.textContent = detail ? `TRANSMITTING \u2014 ${detail}` : "TRANSMITTING";
+      break;
+    case "standby":
+      voiceStatusText.textContent = detail ? `STANDBY [${detail}]` : "STANDBY";
+      break;
+  }
+}
+
+// ── Typewriter effect ───────────────────────────────
+async function typewriterEffect(element: HTMLElement, text: string, speed: number = 25): Promise<void> {
+  element.textContent = "";
+  const cursor = document.createElement("span");
+  cursor.className = "typing-cursor";
+  cursor.textContent = "|";
+  element.appendChild(cursor);
+
+  const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (prefersReducedMotion) {
+    element.textContent = text;
+    return;
+  }
+
+  for (let i = 0; i < text.length; i++) {
+    // Insert character before the cursor
+    cursor.before(text[i]);
+    await new Promise((r) => setTimeout(r, speed));
+  }
+
+  // Remove cursor after typing completes
+  cursor.remove();
+}
+
+// ── Boot sequence ───────────────────────────────────
+async function runBootSequence(): Promise<void> {
+  bootSequenceRunning = true;
+  bootLines.innerHTML = "";
+
+  const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const lines: { text: string; delay: number; check?: boolean; checkDelay?: number }[] = [
+    { text: "> GENESIS REALITY ENGINE v2.0", delay: 300 },
+    { text: "> Authenticating operator...", delay: 600, check: true, checkDelay: 800 },
+    { text: "> Establishing quantum link...", delay: 400, check: true, checkDelay: 1200 },
+    { text: "> Reality buffer allocated", delay: 600 },
+    { text: "> Neural bridge online", delay: 400 },
+    { text: "> AWAITING FIRST COMMAND _", delay: 300 },
+  ];
+
+  for (const line of lines) {
+    if (!bootSequenceRunning) return;
+    await new Promise((r) => setTimeout(r, line.delay));
+    if (!bootSequenceRunning) return;
+
+    const lineEl = document.createElement("div");
+    bootLines.appendChild(lineEl);
+
+    if (prefersReducedMotion) {
+      lineEl.textContent = line.text;
+      if (line.check) {
+        const checkSpan = document.createElement("span");
+        checkSpan.className = "boot-check";
+        checkSpan.textContent = " \u2713";
+        lineEl.appendChild(checkSpan);
+      }
+    } else {
+      // Type out character by character
+      for (let i = 0; i < line.text.length; i++) {
+        if (!bootSequenceRunning) return;
+        lineEl.textContent += line.text[i];
+        await new Promise((r) => setTimeout(r, 30));
+      }
+
+      // If this line gets a checkmark, add it after a delay
+      if (line.check && line.checkDelay) {
+        await new Promise((r) => setTimeout(r, line.checkDelay));
+        if (!bootSequenceRunning) return;
+        const checkSpan = document.createElement("span");
+        checkSpan.className = "boot-check";
+        checkSpan.textContent = " \u2713";
+        lineEl.appendChild(checkSpan);
+      }
+    }
+
+    // Add blinking cursor to last line
+    if (line === lines[lines.length - 1]) {
+      const cursorSpan = document.createElement("span");
+      cursorSpan.className = "boot-cursor";
+      cursorSpan.textContent = "";
+      lineEl.appendChild(cursorSpan);
+    }
+  }
+
+  bootSequenceRunning = false;
+}
+
+function clearBootTerminal() {
+  bootSequenceRunning = false;
+  bootLines.innerHTML = "";
+}
+
+// ── Example prompts rotation ────────────────────────
+function startExampleRotation() {
+  currentExampleIndex = 0;
+  examplePromptBtn.textContent = EXAMPLE_PROMPTS[0];
+  examplePromptBtn.style.opacity = "1";
+
+  exampleRotationInterval = setInterval(() => {
+    // Fade out
+    examplePromptBtn.style.opacity = "0";
+
+    setTimeout(() => {
+      currentExampleIndex = (currentExampleIndex + 1) % EXAMPLE_PROMPTS.length;
+      examplePromptBtn.textContent = EXAMPLE_PROMPTS[currentExampleIndex];
+      // Fade in
+      examplePromptBtn.style.opacity = "1";
+    }, 500);
+  }, 4000);
+}
+
+function stopExampleRotation() {
+  if (exampleRotationInterval !== null) {
+    clearInterval(exampleRotationInterval);
+    exampleRotationInterval = null;
+  }
 }
 
 // ── Image attach helpers ───────────────────────────────
@@ -394,11 +645,16 @@ function updateMicUI() {
   if (voiceMode) {
     micIcon.setAttribute("icon", "lucide:mic-off");
     btnMic.classList.add("voice-active");
+    micLabel.textContent = "LIVE";
+    micLabel.classList.remove("hidden");
   } else {
     micIcon.setAttribute("icon", "lucide:mic");
     btnMic.classList.remove("voice-active");
+    micLabel.textContent = "MIC";
+    micLabel.classList.add("hidden");
     voiceTranscript.classList.add("hidden");
     voiceTranscript.textContent = "";
+    setVoiceStatus("hidden");
   }
 }
 
@@ -471,8 +727,18 @@ async function generateNarration(context: string): Promise<string> {
   }
 }
 
-async function speakNarration(text: string): Promise<void> {
+async function speakNarration(text: string, messageWrapper?: HTMLDivElement): Promise<void> {
   stopNarratorAudio();
+
+  // Find the narrator-message element to add playing state
+  const narratorMsgEl = messageWrapper?.querySelector(".narrator-message") as HTMLElement | null;
+
+  function setPlaying() {
+    narratorMsgEl?.classList.add("narrator-playing");
+  }
+  function clearPlaying() {
+    narratorMsgEl?.classList.remove("narrator-playing");
+  }
 
   if (ELEVENLABS_API_KEY) {
     try {
@@ -493,7 +759,8 @@ async function speakNarration(text: string): Promise<void> {
       const url = URL.createObjectURL(blob);
       currentAudio = new Audio(url);
       currentAudio.playbackRate = 0.95;
-      currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; };
+      setPlaying();
+      currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; clearPlaying(); };
       currentAudio.play();
       return;
     } catch {
@@ -506,6 +773,8 @@ async function speakNarration(text: string): Promise<void> {
   const u = new SpeechSynthesisUtterance(text);
   u.rate = 0.95;
   u.pitch = 0.9;
+  setPlaying();
+  u.onend = () => clearPlaying();
   speechSynthesis.speak(u);
 }
 
@@ -513,8 +782,8 @@ async function narrateAction(context: string) {
   if (!narratorEnabled) return;
   const narration = await generateNarration(context);
   if (!narration || !narratorEnabled) return;
-  addChatMessage("narrator", narration);
-  speakNarration(narration);
+  const wrapper = addChatMessage("narrator", narration);
+  speakNarration(narration, wrapper);
 }
 
 // ── Chat history ───────────────────────────────────────
@@ -531,9 +800,15 @@ function addChatMessage(
     ? `<span class="text-orange-400/60 text-[10px] font-sans tracking-widest uppercase ml-2">+ image</span>`
     : "";
 
+  // Determine typewriter speed based on role (0 = instant)
+  let typeSpeed = 0;
+  if (role === "system") typeSpeed = 20;
+  else if (role === "narrator") typeSpeed = 25;
+  else if (role === "engine" && !opts?.loading) typeSpeed = 15;
+
   if (role === "system") {
     wrapper.innerHTML = `<div class="flex flex-col gap-1">
-      <div class="text-zinc-500 text-xs italic">${escapeHtml(text)}</div>
+      <div class="text-zinc-500 text-xs italic" data-typewriter></div>
     </div>`;
   } else if (role === "director") {
     wrapper.innerHTML = `<div class="flex flex-col gap-2">
@@ -548,8 +823,9 @@ function addChatMessage(
       <div class="flex items-center gap-2 narrator-label">
         <iconify-icon icon="lucide:audio-lines" class="text-[10px]"></iconify-icon>
         <span class="text-[10px] tracking-widest uppercase">Narrator</span>
+        <span class="narrator-bars"><span class="bar"></span><span class="bar"></span><span class="bar"></span></span>
       </div>
-      <p class="narrator-text text-sm font-serif">${escapeHtml(text)}</p>
+      <p class="narrator-text text-sm font-serif" data-typewriter></p>
     </div>`;
   } else {
     const borderClass = opts?.loading ? "border-orange-500/30" : "border-white/10";
@@ -561,7 +837,7 @@ function addChatMessage(
         <iconify-icon icon="${iconName}" class="${iconClass}"></iconify-icon>
         <span class="text-[10px] tracking-widest uppercase">${labelText}</span>
       </div>
-      <p class="text-zinc-400 text-sm font-serif italic">${escapeHtml(text)}</p>
+      <p class="text-zinc-400 text-sm font-serif italic" data-typewriter></p>
     </div>`;
   }
 
@@ -577,6 +853,22 @@ function addChatMessage(
   setTimeout(() => {
     chatHistory.scrollTo({ top: chatHistory.scrollHeight, behavior: "smooth" });
   }, 50);
+
+  // Apply typewriter effect if applicable
+  if (typeSpeed > 0) {
+    const target = wrapper.querySelector("[data-typewriter]") as HTMLElement | null;
+    if (target) {
+      typewriterEffect(target, text, typeSpeed).then(() => {
+        chatHistory.scrollTo({ top: chatHistory.scrollHeight, behavior: "smooth" });
+      });
+    }
+  } else {
+    // Instant text for director and loading engine messages
+    const target = wrapper.querySelector("[data-typewriter]") as HTMLElement | null;
+    if (target) {
+      target.textContent = text;
+    }
+  }
 
   return wrapper;
 }
@@ -616,6 +908,8 @@ function setState(next: AppState) {
       screenContent.style.opacity = "0";
       screenIdle.style.opacity = "0";
       screenBoot.style.opacity = "0";
+      screenBoot.style.pointerEvents = "none";
+      clearBootTerminal();
       crtScreen.classList.remove("scanlines", "screen-flicker");
       ambientGlow.style.opacity = "0";
       hudBar.style.opacity = "0";
@@ -632,21 +926,23 @@ function setState(next: AppState) {
       stopDurationTimer();
       stopFpsCounter();
       clearAttachedImage();
+      stopExampleRotation();
       break;
 
     case "connecting":
       setLed("amber", true);
-      setEngineStatus("Connecting…", "amber");
+      setEngineStatus("Connecting\u2026", "amber");
       screenContent.style.opacity = "0";
       screenIdle.style.opacity = "0";
       screenBoot.style.opacity = "1";
-      bootStatus.textContent = "Initializing systems…";
+      screenBoot.style.pointerEvents = "auto";
       crtScreen.classList.add("scanlines", "screen-flicker");
       ambientGlow.style.opacity = "0.3";
       input.disabled = true;
       btnExecute.disabled = true;
       btnAttach.disabled = true;
       btnMic.disabled = true;
+      stopExampleRotation();
       break;
 
     case "connected":
@@ -655,6 +951,8 @@ function setState(next: AppState) {
       screenContent.style.opacity = "1";
       screenIdle.style.opacity = "1";
       screenBoot.style.opacity = "0";
+      screenBoot.style.pointerEvents = "none";
+      clearBootTerminal();
       crtScreen.classList.add("scanlines", "screen-flicker");
       ambientGlow.style.opacity = "0.5";
       hudBar.style.opacity = "0";
@@ -665,6 +963,7 @@ function setState(next: AppState) {
       btnAttach.disabled = false;
       btnMic.disabled = false;
       input.focus();
+      startExampleRotation();
       break;
 
     case "streaming":
@@ -673,6 +972,7 @@ function setState(next: AppState) {
       screenContent.style.opacity = "1";
       screenIdle.style.opacity = "0";
       screenBoot.style.opacity = "0";
+      screenBoot.style.pointerEvents = "none";
       crtScreen.classList.add("scanlines", "screen-flicker");
       ambientGlow.style.opacity = "1";
       video.style.opacity = "1";
@@ -685,11 +985,12 @@ function setState(next: AppState) {
       input.focus();
       startDurationTimer();
       startFpsCounter();
+      stopExampleRotation();
       break;
 
     case "stopping":
       setLed("amber", true);
-      setEngineStatus("Shutting down…", "amber");
+      setEngineStatus("Shutting down\u2026", "amber");
       input.disabled = true;
       btnExecute.disabled = true;
       btnAttach.disabled = true;
@@ -698,6 +999,7 @@ function setState(next: AppState) {
       stopNarratorAudio();
       stopDurationTimer();
       stopFpsCounter();
+      stopExampleRotation();
       break;
   }
 }
@@ -716,10 +1018,13 @@ function flashError(msg: string) {
 async function powerOn() {
   if (state !== "off") return;
   setState("connecting");
-  addChatMessage("system", "Initializing connection…");
+  addChatMessage("system", "Initializing connection\u2026");
+
+  // Run boot sequence visually in parallel with actual connection
+  const bootPromise = runBootSequence();
 
   try {
-    const mediaStream = await odyssey.connect({
+    const connectedStream = await odyssey.connect({
       onDisconnected: () => {
         if (state !== "off" && state !== "stopping") {
           addChatMessage("system", "Connection lost.");
@@ -748,9 +1053,9 @@ async function powerOn() {
       },
       onStatusChange: (status: string, message?: string) => {
         const statusMap: Record<string, { text: string; color: "red" | "green" | "amber" }> = {
-          authenticating: { text: "Authenticating…", color: "amber" },
-          connecting: { text: "Connecting…", color: "amber" },
-          reconnecting: { text: "Reconnecting…", color: "amber" },
+          authenticating: { text: "Authenticating\u2026", color: "amber" },
+          connecting: { text: "Connecting\u2026", color: "amber" },
+          reconnecting: { text: "Reconnecting\u2026", color: "amber" },
           connected: { text: "Connected", color: "green" },
           disconnected: { text: "Disconnected", color: "red" },
           failed: { text: "Failed", color: "red" },
@@ -760,13 +1065,6 @@ async function powerOn() {
           setEngineStatus(s.text, s.color);
           if (s.color === "amber") setLed("amber", true);
         }
-        // Update boot screen text
-        const bootTextMap: Record<string, string> = {
-          authenticating: "Authenticating…",
-          connecting: "Establishing WebRTC link…",
-          reconnecting: "Reconnecting…",
-        };
-        if (bootTextMap[status]) bootStatus.textContent = bootTextMap[status];
         if (status === "failed" && message) {
           flashError(message);
         }
@@ -780,10 +1078,19 @@ async function powerOn() {
       },
     });
 
-    video.srcObject = mediaStream;
+    video.srcObject = connectedStream;
+
+    // Wait for boot sequence to finish if still running, then transition
+    if (bootSequenceRunning) {
+      await bootPromise;
+      // Small grace period so the last boot line is visible
+      await new Promise((r) => setTimeout(r, 600));
+    }
+
     setState("connected");
     addChatMessage("system", "Connected. Describe a world or attach an image to begin.");
   } catch (err: unknown) {
+    clearBootTerminal();
     const msg = err instanceof Error ? err.message : "Connection failed";
     flashError(msg);
     addChatMessage("system", `Connection failed: ${msg}`);
@@ -950,6 +1257,15 @@ btnMic.addEventListener("click", () => {
 // Narrator toggle
 btnNarrator.addEventListener("click", () => {
   toggleNarrator();
+});
+
+// Example prompt click — fill textarea and focus
+examplePromptBtn.addEventListener("click", () => {
+  const text = examplePromptBtn.textContent?.trim();
+  if (text) {
+    input.value = text;
+    input.focus();
+  }
 });
 
 // Form submit (textarea)

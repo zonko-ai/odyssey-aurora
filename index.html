@@ -97,6 +97,13 @@
         <form id="prompt-form" class="relative group">
           <div class="absolute -inset-0.5 bg-gradient-to-r from-zinc-800 to-zinc-700 rounded-lg blur opacity-25 group-hover:opacity-40 transition duration-500"></div>
           <div class="relative flex flex-col bg-[#232328] border border-white/15 rounded-lg p-1.5 transition-colors focus-within:border-white/30">
+            <!-- Voice status HUD -->
+            <div id="voice-status" class="voice-status hidden">
+              <span class="status-dot"></span>
+              <span id="voice-status-text">LISTENING</span>
+            </div>
+            <!-- Voice waveform visualizer -->
+            <canvas id="voice-waveform" class="waveform-canvas hidden" width="400" height="32"></canvas>
             <!-- Voice transcript preview -->
             <div id="voice-transcript" class="voice-transcript hidden font-sans"></div>
             <textarea
@@ -121,8 +128,9 @@
                 <button type="button" id="btn-attach" class="text-zinc-500 hover:text-zinc-300 transition-colors p-1 disabled:opacity-30 disabled:cursor-not-allowed" disabled>
                   <iconify-icon icon="lucide:image-plus" class="text-sm"></iconify-icon>
                 </button>
-                <button type="button" id="btn-mic" class="text-zinc-500 hover:text-zinc-300 transition-colors p-1 rounded-md border border-transparent disabled:opacity-30 disabled:cursor-not-allowed" disabled title="Voice input">
+                <button type="button" id="btn-mic" class="text-zinc-500 hover:text-zinc-300 transition-colors p-1 rounded-md border border-transparent disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-1" disabled title="Voice input">
                   <iconify-icon icon="lucide:mic" class="text-sm" id="mic-icon"></iconify-icon>
+                  <span id="mic-label" class="mic-live-label hidden">MIC</span>
                 </button>
               </div>
               <button type="submit" id="btn-execute" class="flex items-center gap-1.5 bg-white text-black px-3 py-1.5 rounded-md hover:bg-zinc-200 transition-colors disabled:opacity-30 disabled:cursor-not-allowed" disabled>
@@ -201,12 +209,8 @@
 
               <!-- Boot screen (visible during connecting) -->
               <div id="screen-boot" class="absolute inset-0 z-[25] flex flex-col items-center justify-center opacity-0 transition-opacity duration-500 bg-black">
-                <div class="relative flex flex-col items-center gap-6">
-                  <div class="w-8 h-8 border-2 border-amber-500/60 border-t-amber-400 rounded-full animate-spin"></div>
-                  <div class="flex flex-col items-center gap-2">
-                    <div class="text-amber-400/90 text-sm font-sans font-medium tracking-[0.2em] uppercase">Powering On</div>
-                    <div id="boot-status" class="text-amber-400/40 text-[10px] font-sans tracking-[0.15em]">Initializing systems…</div>
-                  </div>
+                <div id="boot-terminal" class="w-full max-w-[400px] px-8 font-mono text-left">
+                  <div id="boot-lines" class="flex flex-col gap-1.5 text-[11px] text-amber-400/80 tracking-wide"></div>
                 </div>
               </div>
 
@@ -214,9 +218,12 @@
               <div id="screen-idle" class="absolute inset-0 z-20 flex flex-col items-center justify-center opacity-0 transition-opacity duration-700 bg-[#0044cc]">
                 <div class="absolute inset-0 bg-[radial-gradient(ellipse_at_50%_50%,#1155ee_0%,#0033aa_60%,#001a66_100%)]"></div>
                 <div class="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,transparent_40%,rgba(0,0,0,0.35)_100%)]"></div>
-                <div class="relative flex flex-col items-center gap-4">
+                <div class="relative flex flex-col items-center gap-6">
                   <div class="text-white/90 text-base font-sans font-medium tracking-[0.2em] uppercase">Awaiting World Description</div>
-                  <div class="text-white/40 text-[10px] font-sans tracking-[0.15em]">Type a prompt in the sidebar to generate</div>
+                  <div id="example-prompts" class="flex flex-col items-center gap-3">
+                    <div class="text-white/30 text-[10px] font-sans tracking-[0.15em] uppercase">Try saying or typing</div>
+                    <button id="example-prompt-btn" class="text-white/60 hover:text-white/90 text-sm font-serif italic transition-all duration-500 cursor-pointer max-w-[300px] text-center leading-relaxed"></button>
+                  </div>
                 </div>
               </div>
             </div>
