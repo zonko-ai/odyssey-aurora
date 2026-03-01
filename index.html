@@ -214,15 +214,30 @@
                 </div>
               </div>
 
-              <!-- Idle screen — 90s CRT blue (visible when connected, no stream yet) -->
-              <div id="screen-idle" class="absolute inset-0 z-20 flex flex-col items-center justify-center opacity-0 transition-opacity duration-700 bg-[#0044cc]">
-                <div class="absolute inset-0 bg-[radial-gradient(ellipse_at_50%_50%,#1155ee_0%,#0033aa_60%,#001a66_100%)]"></div>
-                <div class="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,transparent_40%,rgba(0,0,0,0.35)_100%)]"></div>
-                <div class="relative flex flex-col items-center gap-6">
-                  <div class="text-white/90 text-base font-sans font-medium tracking-[0.2em] uppercase">Awaiting World Description</div>
+              <!-- Idle screen — retro CRT terminal (visible when connected, no stream yet) -->
+              <div id="screen-idle" class="absolute inset-0 z-20 flex flex-col items-center justify-center opacity-0 transition-opacity duration-700 bg-black">
+                <!-- Subtle grid overlay -->
+                <div class="absolute inset-0 opacity-[0.04]" style="background-image: linear-gradient(rgba(245,158,11,0.3) 1px, transparent 1px), linear-gradient(90deg, rgba(245,158,11,0.3) 1px, transparent 1px); background-size: 40px 40px;"></div>
+                <!-- Radial vignette -->
+                <div class="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,transparent_30%,rgba(0,0,0,0.7)_100%)]"></div>
+                <!-- Content -->
+                <div class="relative flex flex-col items-center gap-8">
+                  <!-- Pulsing reticle -->
+                  <div class="w-16 h-16 border border-amber-500/30 rounded-full flex items-center justify-center animate-pulse">
+                    <div class="w-8 h-8 border border-amber-500/50 rounded-full flex items-center justify-center">
+                      <div class="w-2 h-2 bg-amber-500/80 rounded-full shadow-[0_0_12px_rgba(245,158,11,0.6)]"></div>
+                    </div>
+                  </div>
+                  <div class="flex flex-col items-center gap-2">
+                    <div class="text-amber-500/80 text-xs font-sans font-medium tracking-[0.3em] uppercase">Awaiting Input</div>
+                    <div class="text-amber-500/30 text-[9px] font-sans tracking-[0.2em] uppercase">Reality Engine Ready</div>
+                  </div>
+                  <!-- Separator -->
+                  <div class="w-40 h-px bg-gradient-to-r from-transparent via-amber-500/30 to-transparent"></div>
+                  <!-- Example prompts -->
                   <div id="example-prompts" class="flex flex-col items-center gap-3">
-                    <div class="text-white/30 text-[10px] font-sans tracking-[0.15em] uppercase">Try saying or typing</div>
-                    <button id="example-prompt-btn" class="text-white/60 hover:text-white/90 text-sm font-serif italic transition-all duration-500 cursor-pointer max-w-[300px] text-center leading-relaxed"></button>
+                    <div class="text-amber-500/25 text-[9px] font-sans tracking-[0.2em] uppercase">Try saying or typing</div>
+                    <button id="example-prompt-btn" class="text-amber-400/50 hover:text-amber-400/90 text-sm font-serif italic transition-all duration-500 cursor-pointer max-w-[300px] text-center leading-relaxed hover:drop-shadow-[0_0_8px_rgba(245,158,11,0.3)]"></button>
                   </div>
                 </div>
               </div>

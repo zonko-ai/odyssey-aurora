@@ -131,7 +131,7 @@ function startDeepgram() {
     startWaveform();
     setVoiceStatus("listening");
 
-    const url = `wss://api.deepgram.com/v1/listen?model=nova-3&language=en&smart_format=true&interim_results=true&utterance_end_ms=1500&vad_events=true`;
+    const url = `wss://api.deepgram.com/v1/listen?model=nova-3&detect_language=true&smart_format=true&interim_results=true&utterance_end_ms=1500&vad_events=true`;
     dgSocket = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
 
     dgSocket.onopen = () => {
@@ -470,7 +470,7 @@ function playClick() {
   filter.type = "lowpass";
   filter.frequency.value = 800;
   const gain = ctx.createGain();
-  gain.gain.value = 0.5;
+  gain.gain.value = 2.5;
   source.connect(filter).connect(gain).connect(ctx.destination);
   source.start();
 }
@@ -486,7 +486,7 @@ function startAmbientHum() {
 
   ambientHumGain = ctx.createGain();
   ambientHumGain.gain.value = 0;
-  ambientHumGain.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 1.5);
+  ambientHumGain.gain.linearRampToValueAtTime(0.75, ctx.currentTime + 1.5);
 
   ambientHumOsc.connect(ambientHumGain).connect(ctx.destination);
   ambientHumOsc.start();
