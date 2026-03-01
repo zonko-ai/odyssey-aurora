@@ -87,6 +87,8 @@ const DEEPGRAM_API_KEY = (import.meta.env.VITE_DEEPGRAM_API_KEY as string)?.trim
 let dgSocket: WebSocket | null = null;
 let mediaStream: MediaStream | null = null;
 let mediaRecorder: MediaRecorder | null = null;
+let dgReconnectAttempts = 0;
+const DG_MAX_RECONNECT = 5;
 
 // ── Voice input debounce ────────────────────────────
 let voiceDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -123,6 +125,12 @@ function startDeepgram() {
     return;
   }
 
+  // Clean up any stale socket first
+  if (dgSocket) {
+    try { dgSocket.close(); } catch { /* ignore */ }
+    dgSocket = null;
+  }
+
   navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
     mediaStream = stream;
 
@@ -135,7 +143,9 @@ function startDeepgram() {
     dgSocket = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
 
     dgSocket.onopen = () => {
+      console.log("[deepgram] WebSocket connected");
       isListening = true;
+      dgReconnectAttempts = 0; // Reset on successful connection
       updateMicUI();
 
       // Stream audio via MediaRecorder
@@ -150,6 +160,14 @@ function startDeepgram() {
 
     dgSocket.onmessage = (event) => {
       const data = JSON.parse(event.data);
+
+      // Handle Deepgram error messages
+      if (data.type === "Error" || data.error) {
+        console.error("[deepgram] Server error:", data);
+        flashError(`Voice: ${data.message || data.error || "Server error"}`);
+        return;
+      }
+
       if (data.type === "Results") {
         const transcript = data.channel?.alternatives?.[0]?.transcript || "";
         if (!transcript) {
@@ -186,21 +204,52 @@ function startDeepgram() {
       }
     };
 
-    dgSocket.onerror = () => {
-      flashError("Deepgram connection error.");
-      stopDeepgram();
+    dgSocket.onerror = (ev) => {
+      console.error("[deepgram] WebSocket error:", ev);
+      // Don't call stopDeepgram here — onclose will fire next and handle reconnect
     };
 
-    dgSocket.onclose = () => {
+    dgSocket.onclose = (ev) => {
+      console.log(`[deepgram] WebSocket closed: code=${ev.code} reason="${ev.reason}" wasClean=${ev.wasClean}`);
       isListening = false;
+
+      // Diagnose close codes
+      if (ev.code === 1008 || ev.code === 4001) {
+        flashError("Deepgram: authentication failed. Check API key.");
+        voiceMode = false;
+        updateMicUI();
+        stopWaveform();
+        return;
+      }
+      if (ev.code === 4000) {
+        flashError("Deepgram: bad request — check audio format.");
+        voiceMode = false;
+        updateMicUI();
+        stopWaveform();
+        return;
+      }
+
       if (voiceMode && (state === "connected" || state === "streaming")) {
-        // Auto-reconnect if voice mode is still on
-        setTimeout(() => { if (voiceMode) startDeepgram(); }, 500);
+        // Auto-reconnect with exponential backoff
+        dgReconnectAttempts++;
+        if (dgReconnectAttempts > DG_MAX_RECONNECT) {
+          flashError("Voice connection lost. Click mic to retry.");
+          voiceMode = false;
+          updateMicUI();
+          stopWaveform();
+          return;
+        }
+        const delay = Math.min(500 * Math.pow(2, dgReconnectAttempts - 1), 8000);
+        console.log(`[deepgram] Reconnecting in ${delay}ms (attempt ${dgReconnectAttempts}/${DG_MAX_RECONNECT})`);
+        setTimeout(() => {
+          if (voiceMode) startDeepgram();
+        }, delay);
       } else {
         updateMicUI();
       }
     };
   }).catch((err) => {
+    console.error("[deepgram] getUserMedia error:", err);
     if (err instanceof DOMException && err.name === "NotAllowedError") {
       flashError("Microphone access denied. Check browser permissions.");
     } else {
@@ -217,9 +266,15 @@ function stopDeepgram() {
   }
   mediaRecorder = null;
 
-  if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
-    // Send close signal to Deepgram
-    dgSocket.send(JSON.stringify({ type: "CloseStream" }));
+  if (dgSocket) {
+    // Remove handlers to prevent reconnect loop
+    dgSocket.onclose = null;
+    dgSocket.onerror = null;
+    dgSocket.onmessage = null;
+    if (dgSocket.readyState === WebSocket.OPEN) {
+      // Send close signal to Deepgram
+      dgSocket.send(JSON.stringify({ type: "CloseStream" }));
+    }
     dgSocket.close();
   }
   dgSocket = null;
@@ -230,6 +285,7 @@ function stopDeepgram() {
   }
 
   isListening = false;
+  dgReconnectAttempts = 0;
   if (voiceDebounceTimer) { clearTimeout(voiceDebounceTimer); voiceDebounceTimer = null; }
   pendingVoiceTranscript = "";
   stopWaveform();
@@ -454,52 +510,198 @@ function ensureSfxCtx() {
   return sfxCtx;
 }
 
-/** Soft analog click — short filtered noise burst */
+/** Mechanical toggle switch click — resonant thump + high transient */
 function playClick() {
   const ctx = ensureSfxCtx();
-  const bufferSize = Math.floor(ctx.sampleRate * 0.03); // 30ms
-  const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-  const data = buffer.getChannelData(0);
-  for (let i = 0; i < bufferSize; i++) {
-    // Decaying noise burst
-    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 8);
+  const now = ctx.currentTime;
+
+  // Master gain for the click
+  const master = ctx.createGain();
+  master.gain.value = 1.0;
+  master.connect(ctx.destination);
+
+  // Layer 1: Low-frequency mechanical thump (body of the click)
+  const thump = ctx.createOscillator();
+  thump.type = "sine";
+  thump.frequency.setValueAtTime(150, now);
+  thump.frequency.exponentialRampToValueAtTime(40, now + 0.06);
+  const thumpGain = ctx.createGain();
+  thumpGain.gain.setValueAtTime(0.8, now);
+  thumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+  thump.connect(thumpGain).connect(master);
+  thump.start(now);
+  thump.stop(now + 0.08);
+
+  // Layer 2: High-frequency transient click (the snap)
+  const clickBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.008), ctx.sampleRate);
+  const clickData = clickBuf.getChannelData(0);
+  for (let i = 0; i < clickData.length; i++) {
+    clickData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / clickData.length, 3);
   }
-  const source = ctx.createBufferSource();
-  source.buffer = buffer;
-  const filter = ctx.createBiquadFilter();
-  filter.type = "lowpass";
-  filter.frequency.value = 800;
-  const gain = ctx.createGain();
-  gain.gain.value = 2.5;
-  source.connect(filter).connect(gain).connect(ctx.destination);
-  source.start();
+  const clickSrc = ctx.createBufferSource();
+  clickSrc.buffer = clickBuf;
+  const clickFilter = ctx.createBiquadFilter();
+  clickFilter.type = "bandpass";
+  clickFilter.frequency.value = 3000;
+  clickFilter.Q.value = 2;
+  const clickGain = ctx.createGain();
+  clickGain.gain.setValueAtTime(1.2, now);
+  clickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.015);
+  clickSrc.connect(clickFilter).connect(clickGain).connect(master);
+  clickSrc.start(now);
+
+  // Layer 3: Resonant mid body (makes it feel "mechanical")
+  const mid = ctx.createOscillator();
+  mid.type = "triangle";
+  mid.frequency.setValueAtTime(800, now);
+  mid.frequency.exponentialRampToValueAtTime(200, now + 0.03);
+  const midGain = ctx.createGain();
+  midGain.gain.setValueAtTime(0.3, now);
+  midGain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+  const midFilter = ctx.createBiquadFilter();
+  midFilter.type = "lowpass";
+  midFilter.frequency.value = 2000;
+  mid.connect(midFilter).connect(midGain).connect(master);
+  mid.start(now);
+  mid.stop(now + 0.05);
 }
 
-/** Low ambient hum — fades in when connected */
+/** CRT power-on buzz — brief electrical charge-up */
+function playPowerOnBuzz() {
+  const ctx = ensureSfxCtx();
+  const now = ctx.currentTime;
+
+  const master = ctx.createGain();
+  master.gain.value = 0.4;
+  master.connect(ctx.destination);
+
+  // Rising frequency sweep (CRT charging)
+  const sweep = ctx.createOscillator();
+  sweep.type = "sawtooth";
+  sweep.frequency.setValueAtTime(80, now);
+  sweep.frequency.exponentialRampToValueAtTime(2000, now + 0.3);
+  sweep.frequency.exponentialRampToValueAtTime(120, now + 0.5);
+  const sweepGain = ctx.createGain();
+  sweepGain.gain.setValueAtTime(0.0, now);
+  sweepGain.gain.linearRampToValueAtTime(0.3, now + 0.1);
+  sweepGain.gain.linearRampToValueAtTime(0.15, now + 0.3);
+  sweepGain.gain.linearRampToValueAtTime(0.0, now + 0.5);
+  const sweepFilter = ctx.createBiquadFilter();
+  sweepFilter.type = "lowpass";
+  sweepFilter.frequency.setValueAtTime(500, now);
+  sweepFilter.frequency.linearRampToValueAtTime(4000, now + 0.2);
+  sweepFilter.frequency.linearRampToValueAtTime(800, now + 0.5);
+  sweep.connect(sweepFilter).connect(sweepGain).connect(master);
+  sweep.start(now);
+  sweep.stop(now + 0.5);
+
+  // Electrical noise crackle
+  const noiseBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.4), ctx.sampleRate);
+  const noiseData = noiseBuf.getChannelData(0);
+  for (let i = 0; i < noiseData.length; i++) {
+    const t = i / noiseData.length;
+    // Sparse crackles that fade out
+    noiseData[i] = Math.random() < 0.03 ? (Math.random() * 2 - 1) * (1 - t) : 0;
+  }
+  const noiseSrc = ctx.createBufferSource();
+  noiseSrc.buffer = noiseBuf;
+  const noiseGain = ctx.createGain();
+  noiseGain.gain.setValueAtTime(0.5, now);
+  noiseGain.gain.linearRampToValueAtTime(0.0, now + 0.4);
+  noiseSrc.connect(noiseGain).connect(master);
+  noiseSrc.start(now);
+}
+
+// Track all hum nodes for cleanup
+let humNodes: (OscillatorNode | AudioBufferSourceNode)[] = [];
+
+/** Multi-harmonic CRT transformer hum with noise floor — fades in when connected */
 function startAmbientHum() {
   const ctx = ensureSfxCtx();
   if (ambientHumOsc) return; // already running
 
-  ambientHumOsc = ctx.createOscillator();
-  ambientHumOsc.type = "sine";
-  ambientHumOsc.frequency.value = 60; // 60Hz mains hum
+  const now = ctx.currentTime;
 
   ambientHumGain = ctx.createGain();
-  ambientHumGain.gain.value = 0;
-  ambientHumGain.gain.linearRampToValueAtTime(0.75, ctx.currentTime + 1.5);
+  ambientHumGain.gain.setValueAtTime(0, now);
+  ambientHumGain.gain.linearRampToValueAtTime(1.0, now + 2.0);
+  ambientHumGain.connect(ctx.destination);
 
-  ambientHumOsc.connect(ambientHumGain).connect(ctx.destination);
-  ambientHumOsc.start();
+  humNodes = [];
+
+  // Fundamental 60Hz
+  const osc1 = ctx.createOscillator();
+  osc1.type = "sine";
+  osc1.frequency.value = 60;
+  const g1 = ctx.createGain();
+  g1.gain.value = 0.25;
+  osc1.connect(g1).connect(ambientHumGain);
+  osc1.start(now);
+  humNodes.push(osc1);
+  ambientHumOsc = osc1; // keep reference
+
+  // 2nd harmonic 120Hz (strongest in real CRT transformers)
+  const osc2 = ctx.createOscillator();
+  osc2.type = "sine";
+  osc2.frequency.value = 120;
+  const g2 = ctx.createGain();
+  g2.gain.value = 0.15;
+  osc2.connect(g2).connect(ambientHumGain);
+  osc2.start(now);
+  humNodes.push(osc2);
+
+  // 3rd harmonic 180Hz (adds warmth)
+  const osc3 = ctx.createOscillator();
+  osc3.type = "sine";
+  osc3.frequency.value = 180;
+  const g3 = ctx.createGain();
+  g3.gain.value = 0.06;
+  osc3.connect(g3).connect(ambientHumGain);
+  osc3.start(now);
+  humNodes.push(osc3);
+
+  // Subtle high-frequency whine (CRT flyback — very quiet)
+  const whine = ctx.createOscillator();
+  whine.type = "sine";
+  whine.frequency.value = 15734; // NTSC horizontal scan frequency
+  const whineGain = ctx.createGain();
+  whineGain.gain.value = 0.008; // barely audible
+  whine.connect(whineGain).connect(ambientHumGain);
+  whine.start(now);
+  humNodes.push(whine);
+
+  // Filtered noise floor (electronic hiss)
+  const noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+  const noiseData = noiseBuf.getChannelData(0);
+  for (let i = 0; i < noiseData.length; i++) {
+    noiseData[i] = Math.random() * 2 - 1;
+  }
+  const noiseSrc = ctx.createBufferSource();
+  noiseSrc.buffer = noiseBuf;
+  noiseSrc.loop = true;
+  const noiseFilter = ctx.createBiquadFilter();
+  noiseFilter.type = "bandpass";
+  noiseFilter.frequency.value = 300;
+  noiseFilter.Q.value = 0.5;
+  const noiseGain = ctx.createGain();
+  noiseGain.gain.value = 0.03;
+  noiseSrc.connect(noiseFilter).connect(noiseGain).connect(ambientHumGain);
+  noiseSrc.start(now);
+  humNodes.push(noiseSrc);
 }
 
 function stopAmbientHum() {
   if (ambientHumGain && sfxCtx) {
-    ambientHumGain.gain.linearRampToValueAtTime(0, sfxCtx.currentTime + 0.5);
-    const osc = ambientHumOsc;
-    setTimeout(() => { osc?.stop(); }, 600);
+    const now = sfxCtx.currentTime;
+    ambientHumGain.gain.cancelScheduledValues(now);
+    ambientHumGain.gain.setValueAtTime(ambientHumGain.gain.value, now);
+    ambientHumGain.gain.linearRampToValueAtTime(0, now + 0.5);
+    const nodes = humNodes;
+    setTimeout(() => { nodes.forEach(n => { try { n.stop(); } catch { /* ignore */ } }); }, 600);
   }
   ambientHumOsc = null;
   ambientHumGain = null;
+  humNodes = [];
 }
 
 // ── Image attach helpers ───────────────────────────────
@@ -736,6 +938,7 @@ function toggleVoice() {
   if (voiceMode) {
     // Stop narrator if playing to avoid feedback
     stopNarratorAudio();
+    dgReconnectAttempts = 0; // Fresh start
     startDeepgram();
   } else {
     stopDeepgram();
@@ -1018,6 +1221,7 @@ function setState(next: AppState) {
       setLed("amber", true);
       setEngineStatus("Connecting\u2026", "amber");
       playClick();
+      playPowerOnBuzz();
       screenContent.style.opacity = "0";
       screenIdle.style.opacity = "0";
       screenBoot.style.opacity = "1";
