@@ -35,6 +35,11 @@ const hudFps = document.getElementById("hud-fps") as HTMLSpanElement;
 const engineStatusDot = document.getElementById("engine-status-dot") as HTMLSpanElement;
 const engineStatusText = document.getElementById("engine-status-text") as HTMLSpanElement;
 const powerHint = document.getElementById("power-hint") as HTMLDivElement;
+const btnMic = document.getElementById("btn-mic") as HTMLButtonElement;
+const micIcon = document.getElementById("mic-icon") as HTMLElement;
+const btnNarrator = document.getElementById("btn-narrator") as HTMLButtonElement;
+const narratorIcon = document.getElementById("narrator-icon") as HTMLElement;
+const voiceTranscript = document.getElementById("voice-transcript") as HTMLDivElement;
 
 // ── Clients ────────────────────────────────────────────
 const odyssey = new Odyssey({
@@ -60,6 +65,122 @@ const pendingInteracts = new Map<string, HTMLDivElement>();
 
 // Attached image
 let attachedImage: File | null = null;
+
+// ── Voice & Narrator state ──────────────────────────
+let voiceMode = false;
+let narratorEnabled = false;
+let isListening = false;
+let currentAudio: HTMLAudioElement | null = null;
+
+// ── ElevenLabs config ───────────────────────────────
+const ELEVENLABS_API_KEY = (import.meta.env.VITE_ELEVENLABS_API_KEY as string)?.trim() || "";
+const ELEVENLABS_VOICE_ID = "OtEfb2LVzIE45wdYe54M";
+
+// ── Deepgram STT setup ──────────────────────────────
+const DEEPGRAM_API_KEY = (import.meta.env.VITE_DEEPGRAM_API_KEY as string)?.trim() || "";
+let dgSocket: WebSocket | null = null;
+let mediaStream: MediaStream | null = null;
+let mediaRecorder: MediaRecorder | null = null;
+
+function startDeepgram() {
+  if (!DEEPGRAM_API_KEY) {
+    flashError("Deepgram API key not configured.");
+    return;
+  }
+
+  navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+    mediaStream = stream;
+
+    const url = `wss://api.deepgram.com/v1/listen?model=nova-3&language=en&smart_format=true&interim_results=true&utterance_end_ms=1500&vad_events=true`;
+    dgSocket = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
+
+    dgSocket.onopen = () => {
+      isListening = true;
+      updateMicUI();
+
+      // Stream audio via MediaRecorder
+      mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0 && dgSocket?.readyState === WebSocket.OPEN) {
+          dgSocket.send(e.data);
+        }
+      };
+      mediaRecorder.start(250); // send chunks every 250ms
+    };
+
+    dgSocket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === "Results") {
+        const transcript = data.channel?.alternatives?.[0]?.transcript || "";
+        if (!transcript) return;
+
+        if (data.is_final) {
+          // Final transcript — process it
+          if (data.speech_final) {
+            voiceTranscript.classList.add("hidden");
+            voiceTranscript.textContent = "";
+            handleVoiceInput(transcript.trim());
+          } else {
+            // Partial final — show as interim
+            voiceTranscript.textContent = transcript;
+            voiceTranscript.classList.remove("hidden");
+          }
+        } else {
+          // Interim — show live preview
+          voiceTranscript.textContent = transcript;
+          voiceTranscript.classList.remove("hidden");
+        }
+      } else if (data.type === "UtteranceEnd") {
+        // Utterance boundary — if we have accumulated text, clear preview
+        voiceTranscript.classList.add("hidden");
+      }
+    };
+
+    dgSocket.onerror = () => {
+      flashError("Deepgram connection error.");
+      stopDeepgram();
+    };
+
+    dgSocket.onclose = () => {
+      isListening = false;
+      if (voiceMode && (state === "connected" || state === "streaming")) {
+        // Auto-reconnect if voice mode is still on
+        setTimeout(() => { if (voiceMode) startDeepgram(); }, 500);
+      } else {
+        updateMicUI();
+      }
+    };
+  }).catch((err) => {
+    if (err instanceof DOMException && err.name === "NotAllowedError") {
+      flashError("Microphone access denied. Check browser permissions.");
+    } else {
+      flashError("Could not access microphone.");
+    }
+    voiceMode = false;
+    updateMicUI();
+  });
+}
+
+function stopDeepgram() {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+  }
+  mediaRecorder = null;
+
+  if (dgSocket && dgSocket.readyState === WebSocket.OPEN) {
+    // Send close signal to Deepgram
+    dgSocket.send(JSON.stringify({ type: "CloseStream" }));
+    dgSocket.close();
+  }
+  dgSocket = null;
+
+  if (mediaStream) {
+    mediaStream.getTracks().forEach((t) => t.stop());
+    mediaStream = null;
+  }
+
+  isListening = false;
+}
 
 // ── Image attach helpers ───────────────────────────────
 btnAttach.addEventListener("click", () => {
@@ -268,9 +389,137 @@ function setEngineStatus(text: string, color: "red" | "green" | "amber") {
   engineStatusDot.className = `w-1.5 h-1.5 rounded-full ${dotColors[color]}${color === "green" ? " animate-pulse" : ""}`;
 }
 
+// ── Voice helpers ───────────────────────────────────
+function updateMicUI() {
+  if (voiceMode) {
+    micIcon.setAttribute("icon", "lucide:mic-off");
+    btnMic.classList.add("voice-active");
+  } else {
+    micIcon.setAttribute("icon", "lucide:mic");
+    btnMic.classList.remove("voice-active");
+    voiceTranscript.classList.add("hidden");
+    voiceTranscript.textContent = "";
+  }
+}
+
+function toggleVoice() {
+  if (!DEEPGRAM_API_KEY) {
+    flashError("Deepgram API key not configured.");
+    return;
+  }
+  voiceMode = !voiceMode;
+  if (voiceMode) {
+    // Stop narrator if playing to avoid feedback
+    stopNarratorAudio();
+    startDeepgram();
+  } else {
+    stopDeepgram();
+  }
+  updateMicUI();
+}
+
+function handleVoiceInput(transcript: string) {
+  // Stop narrator audio if playing (user is speaking)
+  stopNarratorAudio();
+
+  if (state === "connected") {
+    startWorld(transcript);
+  } else if (state === "streaming") {
+    interactWorld(transcript);
+  }
+}
+
+// ── Narrator helpers ────────────────────────────────
+function toggleNarrator() {
+  narratorEnabled = !narratorEnabled;
+  narratorIcon.setAttribute("icon", narratorEnabled ? "lucide:volume-2" : "lucide:volume-off");
+  btnNarrator.classList.toggle("text-amber-400", narratorEnabled);
+  btnNarrator.classList.toggle("text-zinc-500", !narratorEnabled);
+  if (!narratorEnabled) stopNarratorAudio();
+}
+
+function stopNarratorAudio() {
+  if (currentAudio) {
+    currentAudio.pause();
+    URL.revokeObjectURL(currentAudio.src);
+    currentAudio = null;
+  }
+  speechSynthesis.cancel();
+}
+
+const NARRATOR_SYSTEM_PROMPT = `You are the Narrator, a cinematic voice describing an unfolding AI-generated world.
+Write ONE vivid sentence (10-25 words) describing what is happening or about to happen.
+Be poetic, dramatic, and present-tense. Sound like a nature documentary or film narrator.
+Never use meta-language. Never mention AI, simulation, or generation.
+Output ONLY the narration sentence. No quotes, no explanation.`;
+
+async function generateNarration(context: string): Promise<string> {
+  try {
+    const response = await gemini.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: context,
+      config: {
+        systemInstruction: NARRATOR_SYSTEM_PROMPT,
+        temperature: 0.8,
+        maxOutputTokens: 100,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    });
+    return response.text?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+async function speakNarration(text: string): Promise<void> {
+  stopNarratorAudio();
+
+  if (ELEVENLABS_API_KEY) {
+    try {
+      const response = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "xi-api-key": ELEVENLABS_API_KEY },
+          body: JSON.stringify({
+            text,
+            model_id: "eleven_turbo_v2_5",
+            voice_settings: { stability: 0.3, similarity_boost: 0.75, style: 0.6, use_speaker_boost: true },
+          }),
+        }
+      );
+      if (!response.ok) throw new Error("ElevenLabs API error");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      currentAudio = new Audio(url);
+      currentAudio.playbackRate = 0.95;
+      currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; };
+      currentAudio.play();
+      return;
+    } catch {
+      // Fall through to Web Speech
+    }
+  }
+
+  // Fallback: Web Speech Synthesis
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 0.95;
+  u.pitch = 0.9;
+  speechSynthesis.speak(u);
+}
+
+async function narrateAction(context: string) {
+  if (!narratorEnabled) return;
+  const narration = await generateNarration(context);
+  if (!narration || !narratorEnabled) return;
+  addChatMessage("narrator", narration);
+  speakNarration(narration);
+}
+
 // ── Chat history ───────────────────────────────────────
 function addChatMessage(
-  role: "director" | "engine" | "system",
+  role: "director" | "engine" | "system" | "narrator",
   text: string,
   opts?: { loading?: boolean; hasImage?: boolean }
 ) {
@@ -293,6 +542,14 @@ function addChatMessage(
         <span class="text-[10px] tracking-widest uppercase">Director</span>${imageTag}
       </div>
       <p class="text-sm leading-relaxed text-zinc-300 font-serif">"${escapeHtml(text)}"</p>
+    </div>`;
+  } else if (role === "narrator") {
+    wrapper.innerHTML = `<div class="flex flex-col gap-2 narrator-message">
+      <div class="flex items-center gap-2 narrator-label">
+        <iconify-icon icon="lucide:audio-lines" class="text-[10px]"></iconify-icon>
+        <span class="text-[10px] tracking-widest uppercase">Narrator</span>
+      </div>
+      <p class="narrator-text text-sm font-serif">${escapeHtml(text)}</p>
     </div>`;
   } else {
     const borderClass = opts?.loading ? "border-orange-500/30" : "border-white/10";
@@ -368,6 +625,10 @@ function setState(next: AppState) {
       input.disabled = true;
       btnExecute.disabled = true;
       btnAttach.disabled = true;
+      btnMic.disabled = true;
+      // Stop voice if active
+      if (voiceMode) { voiceMode = false; stopDeepgram(); updateMicUI(); }
+      stopNarratorAudio();
       stopDurationTimer();
       stopFpsCounter();
       clearAttachedImage();
@@ -385,6 +646,7 @@ function setState(next: AppState) {
       input.disabled = true;
       btnExecute.disabled = true;
       btnAttach.disabled = true;
+      btnMic.disabled = true;
       break;
 
     case "connected":
@@ -401,6 +663,7 @@ function setState(next: AppState) {
       input.disabled = false;
       btnExecute.disabled = false;
       btnAttach.disabled = false;
+      btnMic.disabled = false;
       input.focus();
       break;
 
@@ -418,6 +681,7 @@ function setState(next: AppState) {
       input.disabled = false;
       btnExecute.disabled = false;
       btnAttach.disabled = true; // image only for initial stream
+      btnMic.disabled = false;
       input.focus();
       startDurationTimer();
       startFpsCounter();
@@ -429,6 +693,9 @@ function setState(next: AppState) {
       input.disabled = true;
       btnExecute.disabled = true;
       btnAttach.disabled = true;
+      btnMic.disabled = true;
+      if (voiceMode) { voiceMode = false; stopDeepgram(); updateMicUI(); }
+      stopNarratorAudio();
       stopDurationTimer();
       stopFpsCounter();
       break;
@@ -604,6 +871,7 @@ async function startWorld(rawPrompt: string, image?: File) {
       <p class="text-zinc-400 text-sm font-serif italic">World rendered. Commencing live feed.</p>
     </div>`;
     setState("streaming");
+    narrateAction(`A new world materializes: ${rawPrompt}`);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Stream failed";
     flashError(msg);
@@ -643,6 +911,7 @@ async function interactWorld(rawPrompt: string) {
       pendingInteracts.delete(prompt);
       markAcknowledged(loadingMsg);
     }
+    narrateAction(`The world shifts: ${rawPrompt}`);
   } catch (err: unknown) {
     pendingInteracts.delete(prompt);
     const msg = err instanceof Error ? err.message : "Interaction failed";
@@ -671,6 +940,16 @@ powerBtn.addEventListener("click", () => {
 // New World button
 btnNewWorld.addEventListener("click", () => {
   newWorld();
+});
+
+// Mic toggle
+btnMic.addEventListener("click", () => {
+  toggleVoice();
+});
+
+// Narrator toggle
+btnNarrator.addEventListener("click", () => {
+  toggleNarrator();
 });
 
 // Form submit (textarea)

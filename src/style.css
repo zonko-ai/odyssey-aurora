@@ -67,6 +67,50 @@
   outline: none;
 }
 
+/* ── Voice active pulse ────────────────────────────── */
+@keyframes voice-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+}
+
+.voice-active {
+  animation: voice-pulse 1.5s ease-in-out infinite;
+  background-color: rgba(239, 68, 68, 0.15) !important;
+  color: #f87171 !important;
+  border-color: rgba(239, 68, 68, 0.4) !important;
+}
+
+/* ── Narrator chat message ────────────────────────── */
+.narrator-message {
+  border-left: 2px solid rgba(217, 175, 96, 0.4);
+  padding-left: 0.75rem;
+}
+
+.narrator-message .narrator-label {
+  color: rgba(217, 175, 96, 0.8);
+}
+
+.narrator-message .narrator-text {
+  color: #d4c8a0;
+  font-style: italic;
+}
+
+/* ── Voice transcript preview ─────────────────────── */
+.voice-transcript {
+  font-size: 11px;
+  color: rgba(161, 161, 170, 0.7);
+  padding: 4px 12px;
+  min-height: 0;
+  overflow: hidden;
+  transition: opacity 0.2s ease, max-height 0.2s ease;
+}
+
+.voice-transcript.hidden {
+  opacity: 0;
+  max-height: 0;
+  padding: 0 12px;
+}
+
 /* ── Reduced motion ────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *,
