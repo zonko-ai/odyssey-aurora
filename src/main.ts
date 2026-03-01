@@ -88,10 +88,19 @@ let dgSocket: WebSocket | null = null;
 let mediaStream: MediaStream | null = null;
 let mediaRecorder: MediaRecorder | null = null;
 
+// ── Voice input debounce ────────────────────────────
+let voiceDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingVoiceTranscript = "";
+
 // ── Web Audio API (waveform visualizer) ─────────────
 let audioCtx: AudioContext | null = null;
 let analyserNode: AnalyserNode | null = null;
 let waveformRaf: number | null = null;
+
+// ── Ambient sound ───────────────────────────────────
+let ambientHumGain: GainNode | null = null;
+let ambientHumOsc: OscillatorNode | null = null;
+let sfxCtx: AudioContext | null = null;
 
 // ── Example prompts rotation ────────────────────────
 const EXAMPLE_PROMPTS = [
@@ -149,29 +158,31 @@ function startDeepgram() {
           return;
         }
 
-        if (data.is_final) {
-          // Final transcript — process it
-          if (data.speech_final) {
+        // Show live preview for all transcripts
+        voiceTranscript.textContent = transcript;
+        voiceTranscript.classList.remove("hidden");
+        setVoiceStatus("transmitting", transcript);
+
+        if (data.is_final && data.speech_final) {
+          // User stopped speaking — accumulate and debounce 2s before sending
+          pendingVoiceTranscript = (pendingVoiceTranscript ? pendingVoiceTranscript + " " : "") + transcript.trim();
+          if (voiceDebounceTimer) clearTimeout(voiceDebounceTimer);
+          voiceDebounceTimer = setTimeout(() => {
+            const final = pendingVoiceTranscript.trim();
+            pendingVoiceTranscript = "";
+            voiceDebounceTimer = null;
             voiceTranscript.classList.add("hidden");
             voiceTranscript.textContent = "";
             setVoiceStatus("listening");
-            handleVoiceInput(transcript.trim());
-          } else {
-            // Partial final — show as interim
-            voiceTranscript.textContent = transcript;
-            voiceTranscript.classList.remove("hidden");
-            setVoiceStatus("transmitting", transcript);
-          }
-        } else {
-          // Interim — show live preview
-          voiceTranscript.textContent = transcript;
-          voiceTranscript.classList.remove("hidden");
-          setVoiceStatus("transmitting", transcript);
+            if (final) handleVoiceInput(final);
+          }, 2000);
         }
       } else if (data.type === "UtteranceEnd") {
-        // Utterance boundary — if we have accumulated text, clear preview
-        voiceTranscript.classList.add("hidden");
-        setVoiceStatus("listening");
+        // Utterance boundary — don't clear if debounce pending
+        if (!voiceDebounceTimer) {
+          voiceTranscript.classList.add("hidden");
+          setVoiceStatus("listening");
+        }
       }
     };
 
@@ -219,6 +230,8 @@ function stopDeepgram() {
   }
 
   isListening = false;
+  if (voiceDebounceTimer) { clearTimeout(voiceDebounceTimer); voiceDebounceTimer = null; }
+  pendingVoiceTranscript = "";
   stopWaveform();
   setVoiceStatus("hidden");
 }
@@ -431,6 +444,60 @@ function stopExampleRotation() {
     clearInterval(exampleRotationInterval);
     exampleRotationInterval = null;
   }
+}
+
+// ── Ambient sound cues ──────────────────────────────
+function ensureSfxCtx() {
+  if (!sfxCtx) sfxCtx = new AudioContext();
+  return sfxCtx;
+}
+
+/** Soft analog click — short filtered noise burst */
+function playClick() {
+  const ctx = ensureSfxCtx();
+  const bufferSize = Math.floor(ctx.sampleRate * 0.03); // 30ms
+  const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    // Decaying noise burst
+    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 8);
+  }
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  const filter = ctx.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.frequency.value = 800;
+  const gain = ctx.createGain();
+  gain.gain.value = 0.15;
+  source.connect(filter).connect(gain).connect(ctx.destination);
+  source.start();
+}
+
+/** Low ambient hum — fades in when connected */
+function startAmbientHum() {
+  const ctx = ensureSfxCtx();
+  if (ambientHumOsc) return; // already running
+
+  ambientHumOsc = ctx.createOscillator();
+  ambientHumOsc.type = "sine";
+  ambientHumOsc.frequency.value = 60; // 60Hz mains hum
+
+  ambientHumGain = ctx.createGain();
+  ambientHumGain.gain.value = 0;
+  ambientHumGain.gain.linearRampToValueAtTime(0.04, ctx.currentTime + 1.5);
+
+  ambientHumOsc.connect(ambientHumGain).connect(ctx.destination);
+  ambientHumOsc.start();
+}
+
+function stopAmbientHum() {
+  if (ambientHumGain && sfxCtx) {
+    ambientHumGain.gain.linearRampToValueAtTime(0, sfxCtx.currentTime + 0.5);
+    const osc = ambientHumOsc;
+    setTimeout(() => { osc?.stop(); }, 600);
+  }
+  ambientHumOsc = null;
+  ambientHumGain = null;
 }
 
 // ── Image attach helpers ───────────────────────────────
@@ -927,11 +994,14 @@ function setState(next: AppState) {
       stopFpsCounter();
       clearAttachedImage();
       stopExampleRotation();
+      stopAmbientHum();
+      playClick();
       break;
 
     case "connecting":
       setLed("amber", true);
       setEngineStatus("Connecting\u2026", "amber");
+      playClick();
       screenContent.style.opacity = "0";
       screenIdle.style.opacity = "0";
       screenBoot.style.opacity = "1";
@@ -964,6 +1034,7 @@ function setState(next: AppState) {
       btnMic.disabled = false;
       input.focus();
       startExampleRotation();
+      startAmbientHum();
       break;
 
     case "streaming":
@@ -1000,6 +1071,7 @@ function setState(next: AppState) {
       stopDurationTimer();
       stopFpsCounter();
       stopExampleRotation();
+      stopAmbientHum();
       break;
   }
 }
