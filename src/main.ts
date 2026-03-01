@@ -449,6 +449,8 @@ function stopExampleRotation() {
 // ── Ambient sound cues ──────────────────────────────
 function ensureSfxCtx() {
   if (!sfxCtx) sfxCtx = new AudioContext();
+  // Resume if suspended (browser autoplay policy)
+  if (sfxCtx.state === "suspended") sfxCtx.resume();
   return sfxCtx;
 }
 
@@ -468,7 +470,7 @@ function playClick() {
   filter.type = "lowpass";
   filter.frequency.value = 800;
   const gain = ctx.createGain();
-  gain.gain.value = 0.15;
+  gain.gain.value = 0.5;
   source.connect(filter).connect(gain).connect(ctx.destination);
   source.start();
 }
@@ -484,7 +486,7 @@ function startAmbientHum() {
 
   ambientHumGain = ctx.createGain();
   ambientHumGain.gain.value = 0;
-  ambientHumGain.gain.linearRampToValueAtTime(0.04, ctx.currentTime + 1.5);
+  ambientHumGain.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 1.5);
 
   ambientHumOsc.connect(ambientHumGain).connect(ctx.destination);
   ambientHumOsc.start();
@@ -807,6 +809,8 @@ async function speakNarration(text: string, messageWrapper?: HTMLDivElement): Pr
     narratorMsgEl?.classList.remove("narrator-playing");
   }
 
+  let elevenlabsOk = false;
+
   if (ELEVENLABS_API_KEY) {
     try {
       const response = await fetch(
@@ -821,36 +825,48 @@ async function speakNarration(text: string, messageWrapper?: HTMLDivElement): Pr
           }),
         }
       );
-      if (!response.ok) throw new Error("ElevenLabs API error");
+      if (!response.ok) throw new Error(`ElevenLabs ${response.status}`);
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       currentAudio = new Audio(url);
       currentAudio.playbackRate = 0.95;
       setPlaying();
       currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; clearPlaying(); };
-      currentAudio.play();
-      return;
-    } catch {
-      // Fall through to Web Speech
+      currentAudio.onerror = () => { URL.revokeObjectURL(url); currentAudio = null; clearPlaying(); };
+      await currentAudio.play();
+      elevenlabsOk = true;
+    } catch (err) {
+      console.warn("[narrator] ElevenLabs failed, falling back to Web Speech:", err);
+      // Clean up failed audio
+      if (currentAudio) { currentAudio.pause(); currentAudio = null; }
     }
   }
 
-  // Fallback: Web Speech Synthesis
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.rate = 0.95;
-  u.pitch = 0.9;
-  setPlaying();
-  u.onend = () => clearPlaying();
-  speechSynthesis.speak(u);
+  if (!elevenlabsOk) {
+    // Fallback: Web Speech Synthesis
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 0.95;
+      u.pitch = 0.9;
+      setPlaying();
+      u.onend = () => clearPlaying();
+      u.onerror = () => clearPlaying();
+      speechSynthesis.speak(u);
+    } catch (err) {
+      console.warn("[narrator] Web Speech also failed:", err);
+      clearPlaying();
+    }
+  }
 }
 
 async function narrateAction(context: string) {
   if (!narratorEnabled) return;
   const narration = await generateNarration(context);
+  console.log("[narrator] generated:", narration);
   if (!narration || !narratorEnabled) return;
   const wrapper = addChatMessage("narrator", narration);
-  speakNarration(narration, wrapper);
+  await speakNarration(narration, wrapper);
 }
 
 // ── Chat history ───────────────────────────────────────
