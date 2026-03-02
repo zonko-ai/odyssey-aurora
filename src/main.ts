@@ -3,18 +3,37 @@ import { GoogleGenAI } from "@google/genai";
 
 // ── Types ──────────────────────────────────────────────
 type AppState = "off" | "connecting" | "connected" | "streaming" | "stopping";
+type SessionRole = "active" | "staging";
+
+interface SessionSlot {
+  odyssey: Odyssey;
+  video: HTMLVideoElement;
+  role: SessionRole;
+  connected: boolean;
+  streaming: boolean;
+  streamId: string | null;
+  currentPrompt: string | null;
+}
+
+interface ChannelDef {
+  id: number;
+  name: string;
+  shortName: string;
+  autoPlay: boolean;
+  sceneDuration: number; // ms
+  systemPrompt: string;
+}
 
 // ── Elements ───────────────────────────────────────────
 const app = document.getElementById("app") as HTMLDivElement;
-const video = document.getElementById("world") as HTMLVideoElement;
+const videoA = document.getElementById("video-a") as HTMLVideoElement;
+const videoB = document.getElementById("video-b") as HTMLVideoElement;
+const frozenFrame = document.getElementById("frozen-frame") as HTMLCanvasElement;
 const form = document.getElementById("prompt-form") as HTMLFormElement;
 const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
 const btnExecute = document.getElementById("btn-execute") as HTMLButtonElement;
 const btnAttach = document.getElementById("btn-attach") as HTMLButtonElement;
 const imageInput = document.getElementById("image-input") as HTMLInputElement;
-const imagePreview = document.getElementById("image-preview") as HTMLDivElement;
-const imageThumb = document.getElementById("image-thumb") as HTMLImageElement;
-const imageRemove = document.getElementById("image-remove") as HTMLButtonElement;
 const powerBtn = document.getElementById("power-btn") as HTMLButtonElement;
 const btnNewWorld = document.getElementById("btn-new-world") as HTMLButtonElement;
 const newWorldBar = document.getElementById("new-world-bar") as HTMLDivElement;
@@ -46,15 +65,54 @@ const micLabel = document.getElementById("mic-label") as HTMLSpanElement;
 const bootLines = document.getElementById("boot-lines") as HTMLDivElement;
 const bootTerminal = document.getElementById("boot-terminal") as HTMLDivElement;
 const examplePromptBtn = document.getElementById("example-prompt-btn") as HTMLButtonElement;
+const staticNoise = document.getElementById("static-noise") as HTMLCanvasElement;
+const channelOverlay = document.getElementById("channel-overlay") as HTMLDivElement;
+const channelOverlayNumber = document.getElementById("channel-overlay-number") as HTMLDivElement;
+const channelOverlayName = document.getElementById("channel-overlay-name") as HTMLDivElement;
+const hudChannel = document.getElementById("hud-channel") as HTMLSpanElement;
+const hudFeedLabel = document.getElementById("hud-feed-label") as HTMLSpanElement;
+const chBtn1 = document.getElementById("ch-btn-1") as HTMLButtonElement;
+const chBtn2 = document.getElementById("ch-btn-2") as HTMLButtonElement;
+const chBtn3 = document.getElementById("ch-btn-3") as HTMLButtonElement;
+const channelButtons = [chBtn1, chBtn2, chBtn3];
+const hudCountdown = document.getElementById("hud-countdown") as HTMLSpanElement;
+const imageQueuePreview = document.getElementById("image-queue-preview") as HTMLDivElement;
+const imageQueueStrip = document.getElementById("image-queue-strip") as HTMLDivElement;
+const imageQueueCount = document.getElementById("image-queue-count") as HTMLSpanElement;
+const imageQueueClear = document.getElementById("image-queue-clear") as HTMLButtonElement;
 
 // ── Clients ────────────────────────────────────────────
-const odyssey = new Odyssey({
-  apiKey: (import.meta.env.VITE_ODYSSEY_API_KEY as string)?.trim(),
-});
+const ODYSSEY_API_KEY = (import.meta.env.VITE_ODYSSEY_API_KEY as string)?.trim();
 
 const gemini = new GoogleGenAI({
   apiKey: (import.meta.env.VITE_GEMINI_API_KEY as string)?.trim(),
 });
+
+// ── Dual-session slots ────────────────────────────────
+let slotA: SessionSlot = {
+  odyssey: new Odyssey({ apiKey: ODYSSEY_API_KEY }),
+  video: videoA,
+  role: "active",
+  connected: false,
+  streaming: false,
+  streamId: null,
+  currentPrompt: null,
+};
+
+let slotB: SessionSlot = {
+  odyssey: new Odyssey({ apiKey: ODYSSEY_API_KEY }),
+  video: videoB,
+  role: "staging",
+  connected: false,
+  streaming: false,
+  streamId: null,
+  currentPrompt: null,
+};
+
+let dualSessionAvailable = true;
+
+function activeSlot(): SessionSlot { return slotA.role === "active" ? slotA : slotB; }
+function stagingSlot(): SessionSlot { return slotA.role === "staging" ? slotA : slotB; }
 
 // ── State ──────────────────────────────────────────────
 let state: AppState = "off";
@@ -69,8 +127,9 @@ let durationInterval: ReturnType<typeof setInterval> | null = null;
 // Track pending interact messages for acknowledgement
 const pendingInteracts = new Map<string, HTMLDivElement>();
 
-// Attached image
-let attachedImage: File | null = null;
+// Image queue (Director Mode can queue up to 10)
+let imageQueue: File[] = [];
+const MAX_IMAGE_QUEUE = 10;
 
 // ── Voice & Narrator state ──────────────────────────
 let voiceMode = false;
@@ -80,7 +139,8 @@ let currentAudio: HTMLAudioElement | null = null;
 
 // ── ElevenLabs config ───────────────────────────────
 const ELEVENLABS_API_KEY = (import.meta.env.VITE_ELEVENLABS_API_KEY as string)?.trim() || "";
-const ELEVENLABS_VOICE_ID = "OtEfb2LVzIE45wdYe54M";
+// Jeremy — excited, expressive young male (American-Irish), ideal for awe/wonder narration
+const ELEVENLABS_VOICE_ID = "bVMeCyTHy58xNoL34h3p";
 
 // ── Deepgram STT setup ──────────────────────────────
 const DEEPGRAM_API_KEY = (import.meta.env.VITE_DEEPGRAM_API_KEY as string)?.trim() || "";
@@ -117,6 +177,67 @@ let currentExampleIndex = 0;
 // ── Boot sequence tracking ──────────────────────────
 let bootSequenceRunning = false;
 
+// ── Channel state ──────────────────────────────────
+const CHANNELS: ChannelDef[] = [
+  {
+    id: 1, name: "Wildlife Safari", shortName: "Wildlife", autoPlay: true,
+    sceneDuration: 14_000,
+    systemPrompt: `You are a nature documentary scene designer for Odyssey-2 Pro, a frontier world model that creates continuous 720p video simulations.
+
+Given the previous scene description (or "none" for the first scene), generate the NEXT scene prompt (60-120 words) that continues a wildlife documentary.
+
+Rules:
+- Each scene is a different camera angle, animal, or location within the same ecosystem
+- Maintain continuity: same time of day, weather, season progresses naturally
+- Use stative language ("is walking toward" not "walks to")
+- Include: specific animals with behaviors, lighting, camera angle, atmosphere
+- Vary between: wide establishing shots, close-up animal portraits, action sequences, serene moments
+- Documentary pacing: tension → release → wonder → intimacy
+- Reference real ecosystems: African savanna, Amazon rainforest, Arctic tundra, coral reef, etc.
+
+Output ONLY the scene prompt. No quotes, no explanations.`,
+  },
+  {
+    id: 2, name: "Dream Sequence", shortName: "Dreams", autoPlay: true,
+    sceneDuration: 12_000,
+    systemPrompt: `You are a surrealist visual artist designing dream sequences for Odyssey-2 Pro, a frontier world model that creates continuous 720p video simulations.
+
+Given the previous scene description (or "none" for the first scene), generate the NEXT dream scene prompt (60-120 words) that morphs from the previous.
+
+Rules:
+- Each scene should feel like it evolved/morphed from the previous one through dream logic
+- Use impossible physics, scale shifts, material transformations
+- Blend familiar objects in unfamiliar contexts
+- Use stative language ("is dissolving into" not "dissolves into")
+- Include: surreal subjects, impossible lighting, dreamlike camera movements, shifting materials
+- Vary between: vast cosmic spaces, intimate impossible rooms, underwater-sky inversions, living architecture
+- Draw from: Dalí melting clocks, Escher impossible geometry, Magritte juxtaposition, Studio Ghibli wonder
+- Colors should shift palette between scenes but maintain a cohesive dreamy quality
+
+Output ONLY the scene prompt. No quotes, no explanations.`,
+  },
+  {
+    id: 3, name: "Director Mode", shortName: "Director", autoPlay: false,
+    sceneDuration: 0, systemPrompt: "",
+  },
+];
+
+let currentChannel: ChannelDef = CHANNELS[2]; // Default to Director Mode (CH-3)
+let autoPlayTimer: ReturnType<typeof setTimeout> | null = null;
+let autoPlayActive = false;
+let previousScene = "none";
+let stagingReady = false;
+let sceneCount = 0;
+
+// Director image queue auto-play
+let directorImageQueue: File[] = [];
+let directorImageIndex = 0;
+let directorAutoPlay = false;
+
+// Countdown timer
+let countdownEnd = 0; // timestamp when current world transitions
+let countdownInterval: ReturnType<typeof setInterval> | null = null;
+
 function startDeepgram() {
   if (!DEEPGRAM_API_KEY) {
     flashError("Deepgram API key not configured.");
@@ -137,8 +258,20 @@ function startDeepgram() {
     startWaveform();
     setVoiceStatus("listening");
 
-    const url = `wss://api.deepgram.com/v1/listen?model=nova-3&detect_language=true&smart_format=true&interim_results=true&utterance_end_ms=1500&vad_events=true`;
-    dgSocket = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
+    // Deepgram WebSocket auth uses the Authorization header. Browsers can't set WS headers,
+    // so Deepgram supports passing the API key via Sec-WebSocket-Protocol.
+    // NOTE: `detect_language` is not supported for streaming. Use multilingual models instead.
+    const url = `wss://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&interim_results=true&utterance_end_ms=1500&vad_events=true`;
+    try {
+      dgSocket = new WebSocket(url, ["token", DEEPGRAM_API_KEY]);
+    } catch (err) {
+      console.error("[deepgram] WebSocket init failed:", err);
+      flashError("Deepgram: could not start voice connection.");
+      voiceMode = false;
+      updateMicUI();
+      stopDeepgram();
+      return;
+    }
 
     dgSocket.onopen = () => {
       console.log("[deepgram] WebSocket connected");
@@ -218,6 +351,9 @@ function startDeepgram() {
         updateMicUI();
         stopWaveform();
         return;
+      }
+      if (ev.code === 1006 && dgReconnectAttempts === 0) {
+        flashError("Deepgram: connection failed during handshake (check API key/model/network).");
       }
       if (ev.code === 4000) {
         flashError("Deepgram: bad request — check audio format.");
@@ -614,35 +750,73 @@ function playPowerOnBuzz() {
 function startAmbientHum() { /* no-op */ }
 function stopAmbientHum() { /* no-op */ }
 
-// ── Image attach helpers ───────────────────────────────
+// ── Image queue helpers ─────────────────────────────────
 btnAttach.addEventListener("click", () => {
   imageInput.click();
 });
 
 imageInput.addEventListener("change", () => {
-  const file = imageInput.files?.[0];
-  if (!file) return;
-  if (file.size > 25 * 1024 * 1024) {
-    flashError("Image must be under 25MB.");
-    imageInput.value = "";
+  const files = imageInput.files;
+  if (!files) return;
+  for (const file of files) {
+    if (imageQueue.length >= MAX_IMAGE_QUEUE) {
+      flashError(`Max ${MAX_IMAGE_QUEUE} images.`);
+      break;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      flashError("Image must be under 25MB.");
+      continue;
+    }
+    imageQueue.push(file);
+  }
+  imageInput.value = "";
+  renderImageQueue();
+});
+
+imageQueueClear.addEventListener("click", () => {
+  clearImageQueue();
+});
+
+function clearImageQueue() {
+  // Revoke all blob URLs
+  imageQueueStrip.querySelectorAll("img").forEach((img) => {
+    if (img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+  });
+  imageQueue = [];
+  imageInput.value = "";
+  renderImageQueue();
+}
+
+function removeImageFromQueue(index: number) {
+  const img = imageQueueStrip.querySelectorAll("img")[index];
+  if (img && img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+  imageQueue.splice(index, 1);
+  renderImageQueue();
+}
+
+function renderImageQueue() {
+  imageQueueStrip.innerHTML = "";
+  if (imageQueue.length === 0) {
+    imageQueuePreview.classList.add("hidden");
     return;
   }
-  attachedImage = file;
-  imageThumb.src = URL.createObjectURL(file);
-  imagePreview.classList.remove("hidden");
-});
-
-imageRemove.addEventListener("click", () => {
-  clearAttachedImage();
-});
-
-function clearAttachedImage() {
-  if (imageThumb.src.startsWith("blob:")) {
-    URL.revokeObjectURL(imageThumb.src);
-  }
-  attachedImage = null;
-  imageInput.value = "";
-  imagePreview.classList.add("hidden");
+  imageQueuePreview.classList.remove("hidden");
+  imageQueue.forEach((file, i) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "relative flex-shrink-0";
+    const img = document.createElement("img");
+    img.className = "h-12 rounded border border-white/10";
+    img.src = URL.createObjectURL(file);
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "absolute -top-1.5 -right-1.5 w-4 h-4 bg-zinc-700 rounded-full flex items-center justify-center hover:bg-zinc-500 transition-colors";
+    removeBtn.innerHTML = `<iconify-icon icon="lucide:x" class="text-[8px] text-white"></iconify-icon>`;
+    removeBtn.addEventListener("click", () => removeImageFromQueue(i));
+    wrapper.appendChild(img);
+    wrapper.appendChild(removeBtn);
+    imageQueueStrip.appendChild(wrapper);
+  });
+  imageQueueCount.textContent = `${imageQueue.length}/${MAX_IMAGE_QUEUE} images`;
 }
 
 // ── Duration timer helpers ─────────────────────────────
@@ -676,7 +850,7 @@ function startFpsCounter() {
   hudFps.textContent = "FPS: --";
 
   function tick() {
-    if (video.readyState >= 2) frameCount++;
+    if (activeSlot().video.readyState >= 2) frameCount++;
     const now = performance.now();
     if (now - lastFpsTime >= 1000) {
       hudFps.textContent = `FPS: ${frameCount}`;
@@ -863,6 +1037,7 @@ function handleVoiceInput(transcript: string) {
   if (state === "connected") {
     startWorld(transcript);
   } else if (state === "streaming") {
+    // All channels: voice → interact on active slot
     interactWorld(transcript);
   }
 }
@@ -885,10 +1060,28 @@ function stopNarratorAudio() {
   speechSynthesis.cancel();
 }
 
-const NARRATOR_SYSTEM_PROMPT = `You are the Narrator, a cinematic voice describing an unfolding AI-generated world.
-Write ONE vivid sentence (10-25 words) describing what is happening or about to happen.
-Be poetic, dramatic, and present-tense. Sound like a nature documentary or film narrator.
-Never use meta-language. Never mention AI, simulation, or generation.
+const NARRATOR_SYSTEM_PROMPT = `You are a narrator witnessing extraordinary scenes unfold before you. Speak with genuine warmth and quiet wonder — like David Attenborough discovering something remarkable.
+
+Write ONE sentence (10-25 words). Vary your openings — never start with the same phrase twice. Never start with "Look" or "There."
+
+Your voice:
+- Warm, present, conversational — as if confiding something beautiful to a friend
+- Mix wonder with calm authority. Not every moment needs to be "incredible" — some are simply beautiful, strange, or moving
+- Use concrete sensory details: light, texture, movement, sound, temperature
+- Present tense, active voice
+
+Never mention AI, simulation, screens, or generation. You are describing what you see.
+Output ONLY the narration sentence. No quotes, no explanation.`;
+
+const NARRATOR_INTERACT_PROMPT = `You are a narrator watching a living scene. Something just changed — the user directed a change and it is now happening.
+
+You are given:
+- SCENE: the current world description
+- CHANGE: what just shifted
+
+Write ONE sentence (10-20 words) reacting ONLY to the change, as a natural continuation of the scene. Don't re-describe the whole world — just acknowledge what's new or different, with warmth and wonder.
+
+Vary your openings. Never start with "Look" or "There." Be conversational, not theatrical.
 Output ONLY the narration sentence. No quotes, no explanation.`;
 
 async function generateNarration(context: string): Promise<string> {
@@ -898,7 +1091,7 @@ async function generateNarration(context: string): Promise<string> {
       contents: context,
       config: {
         systemInstruction: NARRATOR_SYSTEM_PROMPT,
-        temperature: 0.8,
+        temperature: 1.0,
         maxOutputTokens: 100,
         thinkingConfig: { thinkingBudget: 0 },
       },
@@ -934,7 +1127,7 @@ async function speakNarration(text: string, messageWrapper?: HTMLDivElement): Pr
           body: JSON.stringify({
             text,
             model_id: "eleven_turbo_v2_5",
-            voice_settings: { stability: 0.3, similarity_boost: 0.75, style: 0.6, use_speaker_boost: true },
+            voice_settings: { stability: 0.2, similarity_boost: 0.8, style: 0.9, use_speaker_boost: true },
           }),
         }
       );
@@ -980,6 +1173,30 @@ async function narrateAction(context: string) {
   if (!narration || !narratorEnabled) return;
   const wrapper = addChatMessage("narrator", narration);
   await speakNarration(narration, wrapper);
+}
+
+/** Narrate a change within an existing scene (interact) — uses separate prompt */
+async function narrateInteract(scene: string, change: string) {
+  if (!narratorEnabled) return;
+  try {
+    const response = await gemini.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `SCENE: ${scene}\nCHANGE: ${change}`,
+      config: {
+        systemInstruction: NARRATOR_INTERACT_PROMPT,
+        temperature: 0.9,
+        maxOutputTokens: 100,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    });
+    const narration = response.text?.trim() || "";
+    if (!narration || !narratorEnabled) return;
+    console.log("[narrator] interact:", narration);
+    const wrapper = addChatMessage("narrator", narration);
+    await speakNarration(narration, wrapper);
+  } catch {
+    // silent fail
+  }
 }
 
 // ── Chat history ───────────────────────────────────────
@@ -1110,20 +1327,28 @@ function setState(next: AppState) {
       ambientGlow.style.opacity = "0";
       hudBar.style.opacity = "0";
       hudOverlay.style.opacity = "0";
-      video.style.opacity = "0";
-      video.srcObject = null;
+      videoA.style.opacity = "0";
+      videoB.style.opacity = "0";
+      frozenFrame.style.opacity = "0";
+      videoA.srcObject = null;
+      videoB.srcObject = null;
       input.disabled = true;
       btnExecute.disabled = true;
       btnAttach.disabled = true;
       btnMic.disabled = true;
+      channelButtons.forEach(b => { b.disabled = true; });
       // Stop voice if active
       if (voiceMode) { voiceMode = false; stopDeepgram(); updateMicUI(); }
       stopNarratorAudio();
       stopDurationTimer();
       stopFpsCounter();
-      clearAttachedImage();
+      clearImageQueue();
       stopExampleRotation();
       stopAmbientHum();
+      stopAutoPlay();
+      // Reset channel to Director
+      currentChannel = CHANNELS[2];
+      updateChannelUI();
       playClick();
       break;
 
@@ -1142,6 +1367,7 @@ function setState(next: AppState) {
       btnExecute.disabled = true;
       btnAttach.disabled = true;
       btnMic.disabled = true;
+      channelButtons.forEach(b => { b.disabled = true; });
       stopExampleRotation();
       break;
 
@@ -1157,14 +1383,18 @@ function setState(next: AppState) {
       ambientGlow.style.opacity = "0.5";
       hudBar.style.opacity = "0";
       hudOverlay.style.opacity = "0";
-      video.style.opacity = "0";
+      videoA.style.opacity = "0";
+      videoB.style.opacity = "0";
+      frozenFrame.style.opacity = "0";
       input.disabled = false;
       btnExecute.disabled = false;
       btnAttach.disabled = false;
       btnMic.disabled = false;
+      channelButtons.forEach(b => { b.disabled = false; });
       input.focus();
       startExampleRotation();
       startAmbientHum();
+      updateChannelUI();
       break;
 
     case "streaming":
@@ -1176,17 +1406,19 @@ function setState(next: AppState) {
       screenBoot.style.pointerEvents = "none";
       crtScreen.classList.add("scanlines", "screen-flicker");
       ambientGlow.style.opacity = "1";
-      video.style.opacity = "1";
+      // Active slot video opacity is managed by startWorld/crossFade
       hudBar.style.opacity = "1";
       hudOverlay.style.opacity = "1";
       input.disabled = false;
       btnExecute.disabled = false;
       btnAttach.disabled = true; // image only for initial stream
       btnMic.disabled = false;
+      channelButtons.forEach(b => { b.disabled = false; });
       input.focus();
       startDurationTimer();
       startFpsCounter();
       stopExampleRotation();
+      updateChannelUI();
       break;
 
     case "stopping":
@@ -1196,6 +1428,7 @@ function setState(next: AppState) {
       btnExecute.disabled = true;
       btnAttach.disabled = true;
       btnMic.disabled = true;
+      channelButtons.forEach(b => { b.disabled = true; });
       if (voiceMode) { voiceMode = false; stopDeepgram(); updateMicUI(); }
       stopNarratorAudio();
       stopDurationTimer();
@@ -1216,6 +1449,165 @@ function flashError(msg: string) {
   }, 4000);
 }
 
+// ── Slot management ─────────────────────────────────────
+function makeSlotHandlers(slot: SessionSlot): Parameters<Odyssey["connect"]>[0] {
+  return {
+    onDisconnected: () => {
+      slot.connected = false;
+      slot.streaming = false;
+      if (slot.role === "active" && state !== "off" && state !== "stopping") {
+        addChatMessage("system", "Connection lost.");
+        setState("off");
+      }
+    },
+    onStreamStarted: () => {
+      slot.streaming = true;
+    },
+    onStreamEnded: () => {
+      slot.streaming = false;
+      if (slot.role === "active" && state === "streaming" && !autoPlayActive) {
+        addChatMessage("system", "Stream ended by server.");
+        stopDurationTimer();
+      }
+    },
+    onStreamError: (_reason: string, message: string) => {
+      if (slot.role === "active") {
+        flashError(message);
+        addChatMessage("engine", `Stream error: ${message}`);
+      }
+    },
+    onError: (error: Error, fatal: boolean) => {
+      if (slot.role === "active") {
+        flashError(error.message);
+        if (fatal) {
+          addChatMessage("system", `Fatal error: ${error.message}`);
+          setState("off");
+        }
+      }
+    },
+    onStatusChange: (status: string, message?: string) => {
+      if (slot.role !== "active") return;
+      const statusMap: Record<string, { text: string; color: "red" | "green" | "amber" }> = {
+        authenticating: { text: "Authenticating…", color: "amber" },
+        connecting: { text: "Connecting…", color: "amber" },
+        reconnecting: { text: "Reconnecting…", color: "amber" },
+        connected: { text: "Connected", color: "green" },
+        disconnected: { text: "Disconnected", color: "red" },
+        failed: { text: "Failed", color: "red" },
+      };
+      const s = statusMap[status];
+      if (s) {
+        setEngineStatus(s.text, s.color);
+        if (s.color === "amber") setLed("amber", true);
+      }
+      if (status === "failed" && message) {
+        flashError(message);
+      }
+    },
+    onInteractAcknowledged: (prompt: string) => {
+      const wrapper = pendingInteracts.get(prompt);
+      if (wrapper) {
+        markAcknowledged(wrapper);
+        pendingInteracts.delete(prompt);
+      }
+    },
+  };
+}
+
+async function connectSlot(slot: SessionSlot): Promise<MediaStream> {
+  const stream = await slot.odyssey.connect(makeSlotHandlers(slot));
+  slot.connected = true;
+  slot.video.srcObject = stream;
+  return stream;
+}
+
+async function startStreamOnSlot(slot: SessionSlot, prompt?: string, image?: File): Promise<void> {
+  slot.currentPrompt = prompt || null;
+  await slot.odyssey.startStream({ prompt, portrait: false, image });
+  slot.streaming = true;
+}
+
+async function endStreamOnSlot(slot: SessionSlot): Promise<void> {
+  if (!slot.streaming) return;
+  try {
+    await slot.odyssey.endStream();
+  } catch { /* stream may already be ended */ }
+  slot.streaming = false;
+  slot.currentPrompt = null;
+}
+
+function disconnectSlot(slot: SessionSlot) {
+  slot.odyssey.disconnect();
+  slot.connected = false;
+  slot.streaming = false;
+  slot.streamId = null;
+  slot.currentPrompt = null;
+  slot.video.srcObject = null;
+}
+
+/** Capture the current frame of a video to the frozen-frame canvas */
+function captureFrame(slot: SessionSlot) {
+  const v = slot.video;
+  if (v.readyState < 2) return;
+  frozenFrame.width = v.videoWidth || v.clientWidth;
+  frozenFrame.height = v.videoHeight || v.clientHeight;
+  const ctx = frozenFrame.getContext("2d");
+  if (ctx) {
+    ctx.drawImage(v, 0, 0, frozenFrame.width, frozenFrame.height);
+    frozenFrame.style.opacity = "1";
+  }
+}
+
+/** Cross-fade from active slot to staging slot */
+async function crossFade(): Promise<void> {
+  const active = activeSlot();
+  const staging = stagingSlot();
+
+  // Capture frame as safety net
+  captureFrame(active);
+
+  // Bring staging to front and fade it in
+  staging.video.style.zIndex = "2";
+  active.video.style.zIndex = "1";
+  staging.video.style.opacity = "1";
+  active.video.style.opacity = "0";
+
+  // Wait for CSS transition to complete
+  await new Promise(r => setTimeout(r, 1600));
+
+  // Swap roles
+  active.role = "staging";
+  staging.role = "active";
+
+  // Hide frozen frame
+  frozenFrame.style.opacity = "0";
+
+  // End stream on old active (now staging) to free resources
+  if (active.streaming) await endStreamOnSlot(active);
+}
+
+/** Cross-fade using frozen frame when dual session is not available */
+async function singleSlotTransition(prompt: string): Promise<void> {
+  const slot = activeSlot();
+
+  // Capture last frame
+  captureFrame(slot);
+
+  // End current stream
+  await endStreamOnSlot(slot);
+
+  // Brief static burst
+  await showStaticBurst(300);
+
+  // Start new stream
+  await startStreamOnSlot(slot, prompt);
+
+  // Fade frozen frame out as new stream appears
+  slot.video.style.opacity = "1";
+  await new Promise(r => setTimeout(r, 500));
+  frozenFrame.style.opacity = "0";
+}
+
 // ── Power on (connect) ─────────────────────────────────
 async function powerOn() {
   if (state !== "off") return;
@@ -1226,66 +1618,22 @@ async function powerOn() {
   const bootPromise = runBootSequence();
 
   try {
-    const connectedStream = await odyssey.connect({
-      onDisconnected: () => {
-        if (state !== "off" && state !== "stopping") {
-          addChatMessage("system", "Connection lost.");
-          setState("off");
-        }
-      },
-      onStreamStarted: () => {
-        // Stream frames arriving
-      },
-      onStreamEnded: () => {
-        if (state === "streaming") {
-          addChatMessage("system", "Stream ended by server.");
-          stopDurationTimer();
-        }
-      },
-      onStreamError: (_reason: string, message: string) => {
-        flashError(message);
-        addChatMessage("engine", `Stream error: ${message}`);
-      },
-      onError: (error: Error, fatal: boolean) => {
-        flashError(error.message);
-        if (fatal) {
-          addChatMessage("system", `Fatal error: ${error.message}`);
-          setState("off");
-        }
-      },
-      onStatusChange: (status: string, message?: string) => {
-        const statusMap: Record<string, { text: string; color: "red" | "green" | "amber" }> = {
-          authenticating: { text: "Authenticating\u2026", color: "amber" },
-          connecting: { text: "Connecting\u2026", color: "amber" },
-          reconnecting: { text: "Reconnecting\u2026", color: "amber" },
-          connected: { text: "Connected", color: "green" },
-          disconnected: { text: "Disconnected", color: "red" },
-          failed: { text: "Failed", color: "red" },
-        };
-        const s = statusMap[status];
-        if (s) {
-          setEngineStatus(s.text, s.color);
-          if (s.color === "amber") setLed("amber", true);
-        }
-        if (status === "failed" && message) {
-          flashError(message);
-        }
-      },
-      onInteractAcknowledged: (prompt: string) => {
-        const wrapper = pendingInteracts.get(prompt);
-        if (wrapper) {
-          markAcknowledged(wrapper);
-          pendingInteracts.delete(prompt);
-        }
-      },
-    });
+    // Connect primary (active) slot
+    await connectSlot(slotA);
 
-    video.srcObject = connectedStream;
+    // Try connecting second slot for dual-session cross-fades
+    try {
+      await connectSlot(slotB);
+      dualSessionAvailable = true;
+      console.log("[genesis] Dual-session mode enabled");
+    } catch (err) {
+      dualSessionAvailable = false;
+      console.warn("[genesis] Second session failed, single-session fallback:", err);
+    }
 
     // Wait for boot sequence to finish if still running, then transition
     if (bootSequenceRunning) {
       await bootPromise;
-      // Small grace period so the last boot line is visible
       await new Promise((r) => setTimeout(r, 600));
     }
 
@@ -1303,18 +1651,19 @@ async function powerOn() {
 // ── Power off (disconnect) ─────────────────────────────
 async function powerOff() {
   if (state === "off" || state === "stopping") return;
-  const wasStreaming = state === "streaming";
   setState("stopping");
 
-  try {
-    if (wasStreaming) {
-      await odyssey.endStream();
-    }
-  } catch {
-    // stream may already be ended
-  }
+  // Stop auto-play if running
+  stopAutoPlay();
 
-  odyssey.disconnect();
+  // End streams on both slots
+  await endStreamOnSlot(slotA).catch(() => {});
+  await endStreamOnSlot(slotB).catch(() => {});
+
+  // Disconnect both
+  disconnectSlot(slotA);
+  disconnectSlot(slotB);
+
   pendingInteracts.clear();
   addChatMessage("system", "Engine offline.");
   setState("off");
@@ -1325,14 +1674,17 @@ async function newWorld() {
   if (state !== "streaming") return;
   addChatMessage("system", "Ending current world…");
 
-  try {
-    await odyssey.endStream();
-  } catch {
-    // stream may already be ended
-  }
+  // Stop auto-play if running
+  stopAutoPlay();
+
+  // End streams on both slots
+  await endStreamOnSlot(activeSlot()).catch(() => {});
+  await endStreamOnSlot(stagingSlot()).catch(() => {});
 
   pendingInteracts.clear();
-  video.style.opacity = "0";
+  activeSlot().video.style.opacity = "0";
+  stagingSlot().video.style.opacity = "0";
+  frozenFrame.style.opacity = "0";
   setState("connected");
   addChatMessage("system", "Ready for a new world. Describe one or attach an image.");
 }
@@ -1352,10 +1704,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 async function startWorld(rawPrompt: string, image?: File) {
   if (state !== "connected") return;
 
+  clearWorldChat();
   const hasImage = !!image;
   addChatMessage("director", rawPrompt || "(image only)", { hasImage });
 
-  const loadingMsg = addChatMessage("engine", "Refining prompt…", { loading: true });
+  const loadingMsg = addChatMessage("engine", "Refining prompt\u2026", { loading: true });
 
   // Refine prompt if provided
   const prompt = rawPrompt ? await refinePrompt(rawPrompt) : undefined;
@@ -1364,14 +1717,17 @@ async function startWorld(rawPrompt: string, image?: File) {
 
   // Update loading message
   const inner = loadingMsg.querySelector("p");
-  if (inner) inner.textContent = hasImage ? "Generating world from image…" : "Generating world…";
+  if (inner) inner.textContent = hasImage ? "Generating world from image\u2026" : "Generating world\u2026";
+
+  const slot = activeSlot();
 
   try {
     await withTimeout(
-      odyssey.startStream({ prompt, portrait: false, image }),
+      startStreamOnSlot(slot, prompt, image),
       45_000,
       "startStream"
     );
+    slot.video.style.opacity = "1";
     loadingMsg.innerHTML = `<div class="flex flex-col gap-2 pl-3 border-l border-white/10">
       <div class="flex items-center gap-2 text-orange-400/80">
         <iconify-icon icon="lucide:cpu" class="text-[10px]"></iconify-icon>
@@ -1415,12 +1771,19 @@ async function interactWorld(rawPrompt: string) {
   pendingInteracts.set(prompt, loadingMsg);
 
   try {
-    await odyssey.interact({ prompt });
+    await activeSlot().odyssey.interact({ prompt });
     if (pendingInteracts.has(prompt)) {
       pendingInteracts.delete(prompt);
       markAcknowledged(loadingMsg);
     }
-    narrateAction(`The world shifts: ${rawPrompt}`);
+    // Extend timer by 12s when interacting during auto-play
+    if (autoPlayActive && countdownEnd > 0) {
+      extendCountdown(12_000);
+      addChatMessage("system", "+12s added");
+    }
+    // Use interact-aware narration (builds on current scene, doesn't restart)
+    const currentScene = activeSlot().currentPrompt || "an unfolding world";
+    narrateInteract(currentScene, rawPrompt);
   } catch (err: unknown) {
     pendingInteracts.delete(prompt);
     const msg = err instanceof Error ? err.message : "Interaction failed";
@@ -1432,6 +1795,548 @@ async function interactWorld(rawPrompt: string) {
       </div>
       <p class="text-red-300 text-sm font-serif italic">${escapeHtml(msg)}</p>
     </div>`;
+  }
+}
+
+// ── Scene generation via Gemini ─────────────────────────
+async function generateNextScene(channel: ChannelDef, prevScene: string): Promise<string> {
+  try {
+    const response = await gemini.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `Previous scene: ${prevScene}`,
+      config: {
+        systemInstruction: channel.systemPrompt,
+        temperature: 0.85,
+        maxOutputTokens: 300,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    });
+    return response.text?.trim() || prevScene;
+  } catch (err) {
+    console.error("[genesis] Scene generation failed:", err);
+    return prevScene;
+  }
+}
+
+// ── Auto-play engine ───────────────────────────────────
+async function startAutoPlay() {
+  if (!currentChannel.autoPlay) return;
+  autoPlayActive = true;
+  previousScene = "none";
+  sceneCount = 0;
+
+  addChatMessage("system", `CH-${currentChannel.id} // ${currentChannel.name} — auto-play started.`);
+
+  // Auto-enable narrator for auto-play channels
+  if (!narratorEnabled) {
+    narratorEnabled = true;
+    narratorIcon.setAttribute("icon", "lucide:volume-2");
+    btnNarrator.classList.add("text-amber-400");
+    btnNarrator.classList.remove("text-zinc-500");
+  }
+
+  // Generate first scene
+  const firstScene = await generateNextScene(currentChannel, "none");
+  previousScene = firstScene;
+  sceneCount++;
+
+  console.log(`[genesis] Scene ${sceneCount}:`, firstScene);
+  addChatMessage("engine", `Scene ${sceneCount}: ${firstScene}`);
+
+  const slot = activeSlot();
+  try {
+    await withTimeout(startStreamOnSlot(slot, firstScene), 45_000, "startStream");
+    slot.video.style.opacity = "1";
+    setState("streaming");
+    narrateAction(`A new scene unfolds: ${firstScene}`);
+    scheduleNextScene();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Auto-play stream failed";
+    flashError(msg);
+    addChatMessage("system", `Auto-play error: ${msg}`);
+    autoPlayActive = false;
+  }
+}
+
+function scheduleNextScene() {
+  if (!autoPlayActive) return;
+
+  // Determine duration — channels use sceneDuration, director image queue uses 14s
+  const duration = currentChannel.autoPlay ? currentChannel.sceneDuration : 14_000;
+
+  // Start preloading next scene immediately (on staging slot) — only for channel auto-play
+  if (currentChannel.autoPlay) {
+    preloadNextScene();
+  } else if (directorAutoPlay) {
+    preloadNextDirectorImage();
+  }
+
+  // Start countdown timer
+  startCountdown(duration);
+
+  // Set timer for scene duration — when it fires, cross-fade
+  autoPlayTimer = setTimeout(autoPlayTimerFired, duration);
+}
+
+async function autoPlayTimerFired() {
+  if (!autoPlayActive) return;
+
+  // Director image auto-play
+  if (directorAutoPlay) {
+    await handleDirectorImageTransition();
+    return;
+  }
+
+  // Channel auto-play
+  if (!dualSessionAvailable) {
+    const nextScene = await generateNextScene(currentChannel, previousScene);
+    if (!autoPlayActive) return;
+    clearWorldChat();
+    previousScene = nextScene;
+    sceneCount++;
+    addChatMessage("engine", `Scene ${sceneCount}: ${nextScene}`);
+    await singleSlotTransition(nextScene);
+    narrateAction(`The scene transitions: ${nextScene}`);
+    scheduleNextScene();
+    return;
+  }
+
+  // Check if staging is ready
+  if (!stagingReady) {
+    console.log("[genesis] Staging not ready, retrying in 2s");
+    startCountdown(2000);
+    autoPlayTimer = setTimeout(() => {
+      if (autoPlayActive) autoPlayTimerFired();
+    }, 2000);
+    return;
+  }
+
+  stagingReady = false;
+  clearWorldChat();
+  await crossFade();
+  narrateAction(`The scene transitions: ${previousScene}`);
+  scheduleNextScene();
+}
+
+async function preloadNextScene() {
+  if (!autoPlayActive || !currentChannel.autoPlay) return;
+  stagingReady = false;
+
+  const nextScene = await generateNextScene(currentChannel, previousScene);
+  if (!autoPlayActive) return;
+
+  previousScene = nextScene;
+  sceneCount++;
+  console.log(`[genesis] Scene ${sceneCount} (preloading):`, nextScene);
+  addChatMessage("engine", `Scene ${sceneCount}: ${nextScene}`);
+
+  const staging = stagingSlot();
+
+  // End any old stream on staging
+  if (staging.streaming) await endStreamOnSlot(staging);
+
+  if (!dualSessionAvailable) {
+    // Single-session fallback: can't preload, will do transition when timer fires
+    stagingReady = false;
+    return;
+  }
+
+  try {
+    await startStreamOnSlot(staging, nextScene);
+    // Keep staging video hidden until cross-fade
+    staging.video.style.opacity = "0";
+    stagingReady = true;
+    console.log("[genesis] Staging ready");
+  } catch (err) {
+    console.error("[genesis] Preload failed:", err);
+    stagingReady = false;
+  }
+}
+
+function stopAutoPlay() {
+  autoPlayActive = false;
+  directorAutoPlay = false;
+  directorImageQueue = [];
+  directorImageIndex = 0;
+  if (autoPlayTimer) {
+    clearTimeout(autoPlayTimer);
+    autoPlayTimer = null;
+  }
+  stagingReady = false;
+  previousScene = "none";
+  sceneCount = 0;
+  stopCountdown();
+}
+
+// ── Director image queue auto-play ─────────────────────
+
+/** Generate a prompt from an image for Odyssey */
+async function generatePromptForImage(imageDescription: string): Promise<string> {
+  try {
+    const response = await gemini.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `Create a vivid scene description for this world: ${imageDescription}`,
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        temperature: 0.7,
+        maxOutputTokens: 300,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    });
+    return response.text?.trim() || "A vivid, immersive world";
+  } catch {
+    return "A vivid, immersive world";
+  }
+}
+
+async function startDirectorImageAutoPlay(images: File[], textPrompt?: string) {
+  directorImageQueue = [...images];
+  directorImageIndex = 0;
+  directorAutoPlay = true;
+  autoPlayActive = true;
+  sceneCount = 0;
+
+  addChatMessage("system", `Director Auto-Play — ${images.length} image${images.length > 1 ? "s" : ""} queued.`);
+
+  // Auto-enable narrator
+  if (!narratorEnabled) {
+    narratorEnabled = true;
+    narratorIcon.setAttribute("icon", "lucide:volume-2");
+    btnNarrator.classList.add("text-amber-400");
+    btnNarrator.classList.remove("text-zinc-500");
+  }
+
+  // Start first image
+  const firstImage = directorImageQueue[0];
+  directorImageIndex = 1;
+  sceneCount = 1;
+
+  clearWorldChat();
+  addChatMessage("engine", `World ${sceneCount}/${directorImageQueue.length}`);
+
+  const slot = activeSlot();
+  try {
+    await withTimeout(
+      startStreamOnSlot(slot, textPrompt || undefined, firstImage),
+      45_000,
+      "startStream"
+    );
+    slot.video.style.opacity = "1";
+    setState("streaming");
+    narrateAction(`A new world materializes from an image`);
+
+    // If more images, schedule next
+    if (directorImageQueue.length > 1) {
+      preloadNextDirectorImage();
+      scheduleNextScene();
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Stream failed";
+    flashError(msg);
+    addChatMessage("system", `Auto-play error: ${msg}`);
+    autoPlayActive = false;
+    directorAutoPlay = false;
+  }
+}
+
+async function preloadNextDirectorImage() {
+  if (!directorAutoPlay || directorImageIndex >= directorImageQueue.length) {
+    stagingReady = false;
+    return;
+  }
+  stagingReady = false;
+
+  const nextImage = directorImageQueue[directorImageIndex];
+  const staging = stagingSlot();
+
+  if (staging.streaming) await endStreamOnSlot(staging);
+
+  if (!dualSessionAvailable) {
+    stagingReady = false;
+    return;
+  }
+
+  try {
+    await startStreamOnSlot(staging, undefined, nextImage);
+    staging.video.style.opacity = "0";
+    stagingReady = true;
+    console.log(`[genesis] Director staging ready: image ${directorImageIndex + 1}`);
+  } catch (err) {
+    console.error("[genesis] Director preload failed:", err);
+    stagingReady = false;
+  }
+}
+
+async function handleDirectorImageTransition() {
+  if (!directorAutoPlay) return;
+
+  // Check if we've exhausted all images
+  if (directorImageIndex >= directorImageQueue.length) {
+    addChatMessage("system", "All images played. Director auto-play complete.");
+    stopAutoPlay();
+    setState("connected");
+    return;
+  }
+
+  if (dualSessionAvailable && stagingReady) {
+    stagingReady = false;
+    directorImageIndex++;
+    sceneCount++;
+    clearWorldChat();
+    addChatMessage("engine", `World ${sceneCount}/${directorImageQueue.length}`);
+    await crossFade();
+    narrateAction(`A new world emerges`);
+
+    // Preload next if available
+    if (directorImageIndex < directorImageQueue.length) {
+      preloadNextDirectorImage();
+      scheduleNextScene();
+    } else {
+      // This was the last image, let it play then stop
+      startCountdown(14_000);
+      autoPlayTimer = setTimeout(() => {
+        addChatMessage("system", "All images played. Director auto-play complete.");
+        stopAutoPlay();
+        setState("connected");
+      }, 14_000);
+    }
+  } else {
+    // Single session fallback or staging not ready
+    if (!stagingReady && dualSessionAvailable) {
+      startCountdown(2000);
+      autoPlayTimer = setTimeout(() => {
+        if (autoPlayActive) handleDirectorImageTransition();
+      }, 2000);
+      return;
+    }
+    // Single session: hard transition
+    const nextImage = directorImageQueue[directorImageIndex];
+    directorImageIndex++;
+    sceneCount++;
+    clearWorldChat();
+    addChatMessage("engine", `World ${sceneCount}/${directorImageQueue.length}`);
+    captureFrame(activeSlot());
+    await endStreamOnSlot(activeSlot());
+    await showStaticBurst(300);
+    await startStreamOnSlot(activeSlot(), undefined, nextImage);
+    activeSlot().video.style.opacity = "1";
+    frozenFrame.style.opacity = "0";
+    narrateAction(`A new world emerges`);
+
+    if (directorImageIndex < directorImageQueue.length) {
+      scheduleNextScene();
+    } else {
+      startCountdown(14_000);
+      autoPlayTimer = setTimeout(() => {
+        addChatMessage("system", "All images played. Director auto-play complete.");
+        stopAutoPlay();
+        setState("connected");
+      }, 14_000);
+    }
+  }
+}
+
+// ── TV Static effect ───────────────────────────────────
+let staticNoiseRaf: number | null = null;
+
+function drawStaticNoise() {
+  const ctx = staticNoise.getContext("2d");
+  if (!ctx) return;
+
+  // Use small buffer for performance
+  const w = 160;
+  const h = 90;
+  staticNoise.width = w;
+  staticNoise.height = h;
+
+  const imageData = ctx.createImageData(w, h);
+  const data = imageData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const v = Math.random() * 255;
+    data[i] = v;
+    data[i + 1] = v;
+    data[i + 2] = v;
+    data[i + 3] = 200;
+  }
+  ctx.putImageData(imageData, 0, 0);
+  staticNoiseRaf = requestAnimationFrame(drawStaticNoise);
+}
+
+function playStaticSound(durationMs: number) {
+  const ctx = ensureSfxCtx();
+  const now = ctx.currentTime;
+  const dur = durationMs / 1000;
+
+  // Bandpass-filtered white noise
+  const bufSize = Math.floor(ctx.sampleRate * dur);
+  const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < bufSize; i++) {
+    data[i] = Math.random() * 2 - 1;
+  }
+
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+
+  const filter = ctx.createBiquadFilter();
+  filter.type = "bandpass";
+  filter.frequency.value = 3000;
+  filter.Q.value = 0.5;
+
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.25, now);
+  gain.gain.linearRampToValueAtTime(0.15, now + dur * 0.3);
+  gain.gain.linearRampToValueAtTime(0, now + dur);
+
+  src.connect(filter).connect(gain).connect(ctx.destination);
+  src.start(now);
+  src.stop(now + dur);
+}
+
+async function showStaticBurst(durationMs: number = 400): Promise<void> {
+  staticNoise.style.opacity = "1";
+  drawStaticNoise();
+  playStaticSound(durationMs);
+
+  await new Promise(r => setTimeout(r, durationMs));
+
+  staticNoise.style.opacity = "0";
+  if (staticNoiseRaf !== null) {
+    cancelAnimationFrame(staticNoiseRaf);
+    staticNoiseRaf = null;
+  }
+}
+
+// ── Channel switching ──────────────────────────────────
+async function switchChannel(channelId: number) {
+  if (state !== "connected" && state !== "streaming") return;
+  const channel = CHANNELS.find(c => c.id === channelId);
+  if (!channel || channel.id === currentChannel.id) return;
+
+  // Stop auto-play if running
+  stopAutoPlay();
+
+  // Brief TV static
+  await showStaticBurst(400);
+
+  // End all active streams
+  await endStreamOnSlot(slotA).catch(() => {});
+  await endStreamOnSlot(slotB).catch(() => {});
+  videoA.style.opacity = "0";
+  videoB.style.opacity = "0";
+  frozenFrame.style.opacity = "0";
+
+  // Reset slot roles
+  slotA.role = "active";
+  slotB.role = "staging";
+
+  currentChannel = channel;
+  pendingInteracts.clear();
+
+  // Show channel overlay
+  showChannelOverlay(channel);
+
+  updateChannelUI();
+
+  if (channel.autoPlay) {
+    // Start auto-play on the new channel
+    await startAutoPlay();
+  } else {
+    // Director Mode — return to connected idle
+    setState("connected");
+    addChatMessage("system", `CH-${channel.id} // ${channel.name} — manual mode. Describe a world to begin.`);
+  }
+}
+
+// ── Channel overlay ────────────────────────────────────
+function showChannelOverlay(channel: ChannelDef) {
+  channelOverlayNumber.textContent = `CH-${channel.id}`;
+  channelOverlayName.textContent = channel.name;
+  channelOverlay.style.opacity = "1";
+
+  setTimeout(() => {
+    channelOverlay.style.opacity = "0";
+  }, 2500);
+}
+
+// ── Countdown timer ────────────────────────────────
+function startCountdown(durationMs: number) {
+  countdownEnd = Date.now() + durationMs;
+  hudCountdown.classList.remove("hidden");
+  updateCountdownDisplay();
+  if (countdownInterval) clearInterval(countdownInterval);
+  countdownInterval = setInterval(updateCountdownDisplay, 200);
+}
+
+function updateCountdownDisplay() {
+  const remaining = Math.max(0, countdownEnd - Date.now());
+  const secs = Math.ceil(remaining / 1000);
+  hudCountdown.textContent = `NEXT ${secs}s`;
+  if (remaining <= 0) {
+    stopCountdown();
+  }
+}
+
+function extendCountdown(extraMs: number) {
+  if (countdownEnd > 0) {
+    countdownEnd += extraMs;
+    // Also extend the auto-play timer
+    if (autoPlayTimer) {
+      clearTimeout(autoPlayTimer);
+      const remaining = Math.max(0, countdownEnd - Date.now());
+      autoPlayTimer = setTimeout(autoPlayTimerFired, remaining);
+    }
+    updateCountdownDisplay();
+  }
+}
+
+function stopCountdown() {
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+  }
+  countdownEnd = 0;
+  hudCountdown.classList.add("hidden");
+}
+
+// ── Chat scoping (clear previous world's messages) ──
+function clearWorldChat() {
+  // Remove all non-system messages (director, engine, narrator)
+  const messages = chatHistory.querySelectorAll(".flex.flex-col.gap-2.transition-all");
+  messages.forEach((msg) => {
+    // Keep only system messages (identified by the italic zinc-500 text)
+    const isSystem = msg.querySelector(".text-zinc-500.text-xs.italic");
+    if (!isSystem) {
+      msg.remove();
+    }
+  });
+}
+
+// ── Channel UI ─────────────────────────────────────────
+function updateChannelUI() {
+  // Update channel button LEDs
+  channelButtons.forEach((btn) => {
+    const chId = parseInt(btn.dataset.channel || "0");
+    const led = btn.querySelector(".channel-led") as HTMLElement;
+    if (chId === currentChannel.id) {
+      led.classList.remove("bg-[#a09f96]");
+      led.classList.add("bg-green-500", "shadow-[0_0_4px_rgba(34,197,94,0.8)]");
+      btn.classList.add("channel-btn-active");
+    } else {
+      led.classList.remove("bg-green-500", "shadow-[0_0_4px_rgba(34,197,94,0.8)]");
+      led.classList.add("bg-[#a09f96]");
+      btn.classList.remove("channel-btn-active");
+    }
+  });
+
+  // Update HUD channel indicator
+  if (currentChannel.id !== 3) {
+    hudChannel.textContent = `CH-${currentChannel.id} // ${currentChannel.shortName}`;
+    hudChannel.classList.remove("hidden");
+    hudFeedLabel.textContent = `Auto // Odyssey-2`;
+  } else {
+    hudChannel.classList.add("hidden");
+    hudFeedLabel.textContent = `Live Feed // Odyssey-2`;
   }
 }
 
@@ -1461,6 +2366,14 @@ btnNarrator.addEventListener("click", () => {
   toggleNarrator();
 });
 
+// Channel buttons
+channelButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const chId = parseInt(btn.dataset.channel || "0");
+    if (chId) switchChannel(chId);
+  });
+});
+
 // Example prompt click — fill textarea and focus
 examplePromptBtn.addEventListener("click", () => {
   const text = examplePromptBtn.textContent?.trim();
@@ -1474,26 +2387,36 @@ examplePromptBtn.addEventListener("click", () => {
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   const val = input.value.trim();
-  const image = attachedImage;
+  const images = [...imageQueue];
 
-  // Need either text or image to submit
-  if (!val && !image) return;
+  // Need either text or images to submit
+  if (!val && images.length === 0) return;
   input.value = "";
-  clearAttachedImage();
+  clearImageQueue();
 
   if (state === "off") {
     powerOn().then(() => {
       const check = setInterval(() => {
         if (state === "connected") {
           clearInterval(check);
-          startWorld(val, image || undefined);
+          if (images.length > 1) {
+            // Multi-image → Director auto-play
+            startDirectorImageAutoPlay(images, val || undefined);
+          } else {
+            startWorld(val, images[0] || undefined);
+          }
         } else if (state === "off") {
           clearInterval(check);
         }
       }, 100);
     });
   } else if (state === "connected") {
-    startWorld(val, image || undefined);
+    if (images.length > 1) {
+      // Multi-image → Director auto-play
+      startDirectorImageAutoPlay(images, val || undefined);
+    } else {
+      startWorld(val, images[0] || undefined);
+    }
   } else if (state === "streaming") {
     if (val) interactWorld(val);
   }
@@ -1520,9 +2443,12 @@ input.addEventListener("paste", (e) => {
         flashError("Image must be under 25MB.");
         return;
       }
-      attachedImage = file;
-      imageThumb.src = URL.createObjectURL(file);
-      imagePreview.classList.remove("hidden");
+      if (imageQueue.length >= MAX_IMAGE_QUEUE) {
+        flashError(`Max ${MAX_IMAGE_QUEUE} images.`);
+        return;
+      }
+      imageQueue.push(file);
+      renderImageQueue();
       return;
     }
   }
@@ -1541,7 +2467,8 @@ document.addEventListener("keydown", (e) => {
 // Cleanup on page unload
 window.addEventListener("beforeunload", () => {
   try {
-    odyssey.disconnect();
+    slotA.odyssey.disconnect();
+    slotB.odyssey.disconnect();
   } catch {
     // ignore
   }

@@ -50,6 +50,17 @@
 - **Vercel env vars can have trailing newlines** — when piping values via CLI or pasting in dashboard, a `\n` can sneak into the value. Always `.trim()` env vars before use, especially API keys. This caused a 401 "Invalid API key" from Odyssey auth that was invisible without inspecting the raw request body.
 - **Vite dep optimizer caches stale SDK versions** — after `npm install` upgrades a package (e.g. `@odysseyml/odyssey` v0.3.0 → v1.0.0), `node_modules/.vite/deps/` may still serve the old version. Fix: `rm -rf node_modules/.vite` and restart the dev server. Symptom: API shape mismatch (old positional args vs new options object) causing silent failures where the server ignores malformed messages.
 - **Odyssey SDK v1.0.0 constructor ignores `dev` config** — `createConfig(config.apiKey)` only takes `apiKey`, discards everything else. To enable debug logging: `(odyssey as any).config.dev.debug = true` after construction.
+- **Deepgram streaming STT** — `detect_language` is not supported for WebSocket streaming; including it can cause handshake failure (`WebSocket closed code=1006`). Remove `detect_language` and/or use a multilingual model. For browser auth, use `new WebSocket(url, ["token", apiKey])` (Sec-WebSocket-Protocol) instead of trying to set headers.
+
+## TV Channel System (v2 Feature)
+- Dual Odyssey instances are fully independent — separate WebRTC/WebSocket connections
+- `SessionSlot` abstraction wraps each Odyssey instance with its own video element, role (active/staging), and state tracking
+- Cross-fade: z-index swap + CSS opacity transition (1500ms), then role swap + end old stream
+- Auto-play: preload next scene on staging slot while current plays, timer fires → crossFade → schedule next
+- Single-session fallback: capture frame to canvas, end stream, static burst, start new stream, fade frozen frame out
+- Channel switching: stopAutoPlay → static burst → end both streams → reset roles → start new channel
+- `staticNoise` canvas uses 160x90 buffer with `image-rendering: pixelated` for performance
+- Bandpass-filtered white noise (3kHz, Q=0.5) for static sound effect
 
 ## Lessons from v1
 - Error recovery: need graceful reconnect, not just page reload
