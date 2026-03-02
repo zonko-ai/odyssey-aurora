@@ -36,9 +36,42 @@
   transition: opacity 0.5s ease;
 }
 
-/* ── Video within CRT ──────────────────────────────── */
-#world {
-  transition: opacity 0.7s ease;
+/* ── Dual video cross-fade ─────────────────────────── */
+#video-a, #video-b {
+  transition: opacity 1500ms ease-in-out;
+}
+
+/* ── Frozen frame fallback ────────────────────────── */
+#frozen-frame {
+  transition: opacity 0.3s ease;
+  image-rendering: auto;
+}
+
+/* ── Static noise canvas ──────────────────────────── */
+#static-noise {
+  transition: opacity 0.15s ease;
+  image-rendering: pixelated;
+}
+
+/* ── Channel overlay ──────────────────────────────── */
+#channel-overlay {
+  transition: opacity 0.3s ease;
+  text-shadow: 0 0 30px rgba(255,255,255,0.4);
+}
+
+/* ── Image queue strip ─────────────────────────────── */
+#image-queue-strip {
+  scrollbar-width: none;
+}
+#image-queue-strip::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Channel buttons ──────────────────────────────── */
+.channel-btn-active {
+  box-shadow:
+    inset 1px 1px 3px rgba(0,0,0,0.3),
+    inset -1px -1px 3px rgba(255,255,255,0.4) !important;
 }
 
 /* ── Screen content transitions ────────────────────── */

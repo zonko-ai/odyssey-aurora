@@ -113,18 +113,19 @@
               spellcheck="false"
               disabled
             ></textarea>
-            <!-- Image preview -->
-            <div id="image-preview" class="hidden px-3 pb-2">
-              <div class="relative inline-block">
-                <img id="image-thumb" class="h-12 rounded border border-white/10" />
-                <button type="button" id="image-remove" class="absolute -top-1.5 -right-1.5 w-4 h-4 bg-zinc-700 rounded-full flex items-center justify-center hover:bg-zinc-500 transition-colors">
-                  <iconify-icon icon="lucide:x" class="text-[8px] text-white"></iconify-icon>
-                </button>
+            <!-- Image queue preview -->
+            <div id="image-queue-preview" class="hidden px-3 pb-2">
+              <div id="image-queue-strip" class="flex items-center gap-2 overflow-x-auto py-1">
+                <!-- Thumbnails inserted dynamically -->
+              </div>
+              <div class="flex items-center justify-between mt-1.5">
+                <span id="image-queue-count" class="text-[10px] text-zinc-500 font-sans tracking-wide"></span>
+                <button type="button" id="image-queue-clear" class="text-[10px] text-zinc-500 hover:text-zinc-300 font-sans tracking-wide transition-colors">Clear all</button>
               </div>
             </div>
             <div class="flex items-center justify-between px-3 pb-1.5">
               <div class="flex items-center gap-2">
-                <input type="file" id="image-input" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp,image/heic,image/heif,image/avif" class="hidden" />
+                <input type="file" id="image-input" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp,image/heic,image/heif,image/avif" multiple class="hidden" />
                 <button type="button" id="btn-attach" class="text-zinc-500 hover:text-zinc-300 transition-colors p-1 disabled:opacity-30 disabled:cursor-not-allowed" disabled>
                   <iconify-icon icon="lucide:image-plus" class="text-sm"></iconify-icon>
                 </button>
@@ -175,22 +176,31 @@
                 <section class="w-full h-full relative bg-black flex flex-col overflow-hidden">
 
                   <!-- Top HUD Bar -->
-                  <div id="hud-bar" class="h-6 w-full bg-[#050505]/80 backdrop-blur-sm border-b border-white/10 flex items-center justify-between px-3 z-30 shrink-0 absolute top-0 left-0 opacity-0 transition-opacity duration-500">
+                  <div id="hud-bar" class="h-7 w-full bg-black/90 backdrop-blur-sm border-b border-white/15 flex items-center justify-between px-3 z-30 shrink-0 absolute top-0 left-0 opacity-0 transition-opacity duration-500">
                     <div class="flex items-center gap-2">
                       <div class="w-1.5 h-1.5 rounded-full bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,1)]"></div>
-                      <span class="text-[9px] text-zinc-200 tracking-[0.2em] uppercase font-sans">Live Feed // Odyssey-2</span>
+                      <span id="hud-feed-label" class="text-[10px] text-white tracking-[0.15em] uppercase font-sans font-medium">Live Feed // Odyssey-2</span>
+                      <span id="hud-channel" class="text-[10px] text-amber-400 tracking-[0.15em] uppercase font-sans font-medium hidden"></span>
                     </div>
-                    <div class="flex items-center gap-4 text-[9px] text-white/80 tracking-[0.2em] uppercase font-sans">
-                      <span>720p</span>
-                      <span id="hud-fps" class="tabular-nums">FPS: --</span>
-                      <span id="hud-duration" class="text-white tabular-nums">00:00</span>
+                    <div class="flex items-center gap-4 text-[10px] text-white tracking-[0.15em] uppercase font-sans">
+                      <span id="hud-countdown" class="text-amber-400 tabular-nums font-medium hidden">NEXT 00s</span>
+                      <span class="text-white/60">720p</span>
+                      <span id="hud-fps" class="tabular-nums text-white/60">FPS: --</span>
+                      <span id="hud-duration" class="text-white tabular-nums font-medium">00:00</span>
                     </div>
                   </div>
 
                   <!-- Video + Overlays -->
                   <div class="relative w-full h-full">
-                    <video id="world" autoplay playsinline muted class="absolute inset-0 w-full h-full object-cover opacity-0 transition-opacity duration-700"></video>
-                    <div class="absolute inset-0 bg-gradient-to-t from-orange-950/40 via-transparent to-black/30 mix-blend-multiply pointer-events-none"></div>
+                    <video id="video-a" autoplay playsinline muted
+                      class="absolute inset-0 w-full h-full object-cover transition-opacity duration-[1500ms] ease-in-out"
+                      style="opacity: 0; z-index: 1;"></video>
+                    <video id="video-b" autoplay playsinline muted
+                      class="absolute inset-0 w-full h-full object-cover transition-opacity duration-[1500ms] ease-in-out"
+                      style="opacity: 0; z-index: 2;"></video>
+                    <canvas id="frozen-frame" class="absolute inset-0 w-full h-full object-cover pointer-events-none"
+                      style="opacity: 0; z-index: 3; transition: opacity 0.3s ease;"></canvas>
+                    <div class="absolute inset-0 bg-gradient-to-t from-orange-950/40 via-transparent to-black/30 mix-blend-multiply pointer-events-none z-[4]"></div>
 
                     <!-- HUD Corner Brackets -->
                     <div class="absolute inset-0 pointer-events-none p-5 md:p-8 flex flex-col justify-between z-30 pt-10 opacity-0 transition-opacity duration-500" id="hud-overlay">
@@ -205,6 +215,18 @@
                     </div>
                   </div>
                 </section>
+              </div>
+
+              <!-- Static noise overlay (for channel switches) -->
+              <canvas id="static-noise" class="absolute inset-0 w-full h-full pointer-events-none"
+                style="z-index: 5; opacity: 0; transition: opacity 0.15s ease;"></canvas>
+
+              <!-- Channel overlay (TV-style channel display) -->
+              <div id="channel-overlay" class="absolute inset-0 z-[6] flex items-center justify-center pointer-events-none" style="opacity: 0; transition: opacity 0.3s ease;">
+                <div class="text-center">
+                  <div class="text-white text-4xl font-sans font-black tracking-widest drop-shadow-[0_0_20px_rgba(255,255,255,0.3)]" id="channel-overlay-number">CH-1</div>
+                  <div class="text-white/70 text-sm font-sans tracking-[0.3em] uppercase mt-2" id="channel-overlay-name">Wildlife Safari</div>
+                </div>
               </div>
 
               <!-- Boot screen (visible during connecting) -->
@@ -251,10 +273,19 @@
               <span class="font-sans font-bold tracking-widest text-[#9a9890] text-xs drop-shadow-[0_1px_1px_rgba(255,255,255,0.9)] italic">Multiscan</span>
             </div>
             <div class="flex items-center gap-6 sm:gap-8">
-              <div class="flex gap-4">
-                <button class="w-8 h-2.5 bg-[#c4c2b9] rounded-sm shadow-[inset_-1px_-1px_3px_rgba(0,0,0,0.3),inset_1px_1px_3px_rgba(255,255,255,0.8),0_2px_4px_rgba(0,0,0,0.2)] active:shadow-[inset_1px_1px_3px_rgba(0,0,0,0.4),inset_-1px_-1px_3px_rgba(255,255,255,0.4)] transition-shadow"></button>
-                <button class="w-8 h-2.5 bg-[#c4c2b9] rounded-sm shadow-[inset_-1px_-1px_3px_rgba(0,0,0,0.3),inset_1px_1px_3px_rgba(255,255,255,0.8),0_2px_4px_rgba(0,0,0,0.2)] active:shadow-[inset_1px_1px_3px_rgba(0,0,0,0.4),inset_-1px_-1px_3px_rgba(255,255,255,0.4)] transition-shadow"></button>
-                <button class="w-8 h-2.5 bg-[#c4c2b9] rounded-sm shadow-[inset_-1px_-1px_3px_rgba(0,0,0,0.3),inset_1px_1px_3px_rgba(255,255,255,0.8),0_2px_4px_rgba(0,0,0,0.2)] active:shadow-[inset_1px_1px_3px_rgba(0,0,0,0.4),inset_-1px_-1px_3px_rgba(255,255,255,0.4)] transition-shadow"></button>
+              <div class="flex gap-3">
+                <button id="ch-btn-1" class="channel-btn w-8 h-8 bg-[#c4c2b9] rounded-md shadow-[inset_-1px_-1px_3px_rgba(0,0,0,0.3),inset_1px_1px_3px_rgba(255,255,255,0.8),0_2px_4px_rgba(0,0,0,0.2)] active:shadow-[inset_1px_1px_3px_rgba(0,0,0,0.4),inset_-1px_-1px_3px_rgba(255,255,255,0.4)] transition-all flex flex-col items-center justify-center gap-0.5 disabled:opacity-40 disabled:cursor-not-allowed" data-channel="1" title="Wildlife Safari" disabled>
+                  <span class="channel-led w-1.5 h-1.5 rounded-full bg-[#a09f96] transition-colors duration-300"></span>
+                  <span class="text-[8px] font-sans font-bold text-[#6b6960]">1</span>
+                </button>
+                <button id="ch-btn-2" class="channel-btn w-8 h-8 bg-[#c4c2b9] rounded-md shadow-[inset_-1px_-1px_3px_rgba(0,0,0,0.3),inset_1px_1px_3px_rgba(255,255,255,0.8),0_2px_4px_rgba(0,0,0,0.2)] active:shadow-[inset_1px_1px_3px_rgba(0,0,0,0.4),inset_-1px_-1px_3px_rgba(255,255,255,0.4)] transition-all flex flex-col items-center justify-center gap-0.5 disabled:opacity-40 disabled:cursor-not-allowed" data-channel="2" title="Dream Sequence" disabled>
+                  <span class="channel-led w-1.5 h-1.5 rounded-full bg-[#a09f96] transition-colors duration-300"></span>
+                  <span class="text-[8px] font-sans font-bold text-[#6b6960]">2</span>
+                </button>
+                <button id="ch-btn-3" class="channel-btn w-8 h-8 bg-[#c4c2b9] rounded-md shadow-[inset_-1px_-1px_3px_rgba(0,0,0,0.3),inset_1px_1px_3px_rgba(255,255,255,0.8),0_2px_4px_rgba(0,0,0,0.2)] active:shadow-[inset_1px_1px_3px_rgba(0,0,0,0.4),inset_-1px_-1px_3px_rgba(255,255,255,0.4)] transition-all flex flex-col items-center justify-center gap-0.5 disabled:opacity-40 disabled:cursor-not-allowed" data-channel="3" title="Director Mode" disabled>
+                  <span class="channel-led w-1.5 h-1.5 rounded-full bg-[#a09f96] transition-colors duration-300"></span>
+                  <span class="text-[8px] font-sans font-bold text-[#6b6960]">3</span>
+                </button>
               </div>
               <div class="flex items-center gap-3">
                 <div class="relative">
